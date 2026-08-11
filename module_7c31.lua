@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "consistency-webhooks-9"
+local ENGINE_BUILD = "calibrated-autoremote-11"
 
 if env.GPINATA_ENABLED == false then
     return
@@ -15,6 +15,19 @@ env.STOP_MINI_PINATA_FAST_PLACER = false
 env.GPINATA_ENGINE_BUILD = ENGINE_BUILD
 
 local bootStartedAt = os.clock()
+local dashboard = {
+    state = "Booting",
+    gems = nil,
+    pinatas = nil,
+    interval = tonumber(env.GPINATA_INTERVAL) or 6.2,
+    hourly = 0,
+    daily = 0,
+    successRate = 100,
+    calibration = "Loading profile",
+    remote = "Resolving",
+}
+dashboard.hourly = 3600 / dashboard.interval
+dashboard.daily = 86400 / dashboard.interval
 
 task.spawn(function()
     if not game:IsLoaded() then
@@ -163,6 +176,92 @@ task.spawn(function()
         return sign .. formatted
     end
 
+    local function formatCompact(value)
+        local number = tonumber(value)
+
+        if not number then
+            return "Loading…"
+        end
+
+        local absolute = math.abs(number)
+        local suffixes = {
+            { 1e15, "Q" },
+            { 1e12, "T" },
+            { 1e9, "B" },
+            { 1e6, "M" },
+            { 1e3, "K" },
+        }
+
+        for _, entry in ipairs(suffixes) do
+            if absolute >= entry[1] then
+                local compact = number / entry[1]
+                local decimals = math.abs(compact) >= 100 and 0
+                    or math.abs(compact) >= 10 and 1
+                    or 2
+                return string.format("%." .. decimals .. "f%s", compact, entry[2])
+            end
+        end
+
+        return formatInteger(number)
+    end
+
+    local function dashboardDescription(detail, targetZone)
+        local stateIcons = {
+            Running = "🟢",
+            Calibrating = "🟡",
+            Paused = "🟠",
+            Circuit = "🔴",
+            Fault = "🔴",
+            Stopped = "⚫",
+            Booting = "🔵",
+        }
+        local state = dashboard.state or "Booting"
+        local stateIcon = stateIcons[state] or "🔵"
+        local pinataText = dashboard.pinatas == nil
+            and "Loading…"
+            or formatInteger(dashboard.pinatas)
+        local gemText = dashboard.gems == nil
+            and "Loading…"
+            or string.format(
+                "%s (`%s`)",
+                formatCompact(dashboard.gems),
+                formatInteger(dashboard.gems)
+            )
+        local hourly = tonumber(dashboard.hourly) or 0
+        local daily = tonumber(dashboard.daily) or 0
+        local lines = {
+            string.format(
+                "%s **%s**  •  Area `%s`  •  Interval `%.2fs`",
+                stateIcon,
+                state,
+                tostring(targetZone or env.GZONE_TO or "?"),
+                tonumber(dashboard.interval) or 0
+            ),
+            string.format(
+                "💎 **%s gems**  •  🪅 **%s piñatas**",
+                gemText,
+                pinataText
+            ),
+            string.format(
+                "⚡ **%.1f/hour**  •  **%.0f/day**  •  ✅ **%.2f%% success**",
+                hourly,
+                daily,
+                tonumber(dashboard.successRate) or 0
+            ),
+            string.format(
+                "🧠 **%s**  •  🔗 **%s**",
+                tostring(dashboard.calibration or "Not available"),
+                tostring(dashboard.remote or "Resolving")
+            ),
+        }
+
+        if type(detail) == "string" and detail ~= "" then
+            table.insert(lines, "\n" .. detail)
+        end
+
+        return table.concat(lines, "\n")
+    end
+
     local function webhookField(name, value, inline)
         return {
             name = safeWebhookText(name, 256),
@@ -177,11 +276,14 @@ task.spawn(function()
         local jobId = game.JobId ~= "" and game.JobId or "Unknown"
 
         return {
-            webhookField("Account", accountName, true),
-            webhookField("Roblox User ID", userId, true),
+            webhookField("Account", accountName .. " (`" .. tostring(userId) .. "`)", true),
             webhookField("Configured Area", targetZone or env.GZONE_TO or "Unknown", true),
             webhookField("Client Uptime", formatDuration(os.clock() - bootStartedAt), true),
-            webhookField("Place ID", game.PlaceId, true),
+            webhookField(
+                "Game Build",
+                tostring(game.PlaceId) .. " • v" .. tostring(game.PlaceVersion),
+                true
+            ),
             webhookField("Server Job ID", jobId, false),
         }
     end
@@ -321,7 +423,13 @@ task.spawn(function()
             embeds = {
                 {
                     title = safeWebhookText(options.title or "Mini Pinata Update", 256),
-                    description = safeWebhookText(options.description or "", 4096),
+                    description = safeWebhookText(
+                        dashboardDescription(
+                            options.description,
+                            options.targetZone
+                        ),
+                        4096
+                    ),
                     color = tonumber(options.color) or 3447003,
                     fields = fields,
                     footer = {
@@ -411,9 +519,9 @@ task.spawn(function()
         heartbeat("engine initialization")
 
         local SETTINGS = {
-            -- Start at the consistency-first 6.2-second target. The controller may
-            -- slow an individual account under server pressure, then recover
-            -- toward this target after stable observation windows.
+            -- The short window detects pressure quickly. Recovery uses a much
+            -- longer observation period plus a time hold so one lucky 20-cycle
+            -- window can never make the engine speed up again.
             INTERVAL = math.max(1.5, numberSetting("GPINATA_INTERVAL", 6.2)),
             ADAPTIVE = env.GPINATA_ADAPTIVE ~= false,
             ADAPTIVE_MIN_INTERVAL = math.max(
@@ -427,6 +535,10 @@ task.spawn(function()
             ADAPTIVE_WINDOW = math.max(
                 10,
                 math.floor(numberSetting("GPINATA_ADAPTIVE_WINDOW", 20))
+            ),
+            ADAPTIVE_LONG_WINDOW = math.max(
+                50,
+                math.floor(numberSetting("GPINATA_ADAPTIVE_LONG_WINDOW", 150))
             ),
             ADAPTIVE_STEP_UP = math.max(
                 0.01,
@@ -448,9 +560,24 @@ task.spawn(function()
                 0.01,
                 numberSetting("GPINATA_ADAPTIVE_PRESSURE_STEP", 0.10)
             ),
-            ADAPTIVE_STABLE_WINDOWS = math.max(
-                1,
-                math.floor(numberSetting("GPINATA_ADAPTIVE_STABLE_WINDOWS", 1))
+            ADAPTIVE_RECOVERY_HOLD = math.max(
+                60,
+                numberSetting("GPINATA_ADAPTIVE_RECOVERY_HOLD", 1800)
+            ),
+            ADAPTIVE_FAILURE_HOLD = math.max(
+                60,
+                numberSetting("GPINATA_ADAPTIVE_FAILURE_HOLD", 1800)
+            ),
+            ADAPTIVE_RECOVERY_MAX_REJECT_RATE = math.max(
+                0,
+                numberSetting("GPINATA_ADAPTIVE_RECOVERY_MAX_REJECT_RATE", 0.03)
+            ),
+            ADAPTIVE_RECOVERY_MAX_SECOND_RETRIES = math.max(
+                0,
+                math.floor(numberSetting(
+                    "GPINATA_ADAPTIVE_RECOVERY_MAX_SECOND_RETRIES",
+                    0
+                ))
             ),
             CONFIRM_WAIT = math.max(0.25, numberSetting("GPINATA_CONFIRM_WAIT", 1.5)),
             RETRY_DELAY = math.max(0.25, numberSetting("GPINATA_RETRY_DELAY", 1)),
@@ -490,6 +617,41 @@ task.spawn(function()
             RETRY_DISABLE_AFTER = 1,
             REJECTION_BACKOFF_BASE = 2,
             REJECTION_BACKOFF_MAX = 30,
+            CIRCUIT_BREAKER_AFTER = math.max(
+                2,
+                math.floor(numberSetting("GPINATA_CIRCUIT_BREAKER_AFTER", 3))
+            ),
+            CIRCUIT_BREAKER_INITIAL_DELAY = math.max(
+                10,
+                numberSetting("GPINATA_CIRCUIT_BREAKER_INITIAL_DELAY", 30)
+            ),
+            CIRCUIT_BREAKER_MAX_DELAY = math.max(
+                30,
+                numberSetting("GPINATA_CIRCUIT_BREAKER_MAX_DELAY", 300)
+            ),
+            PACING_JITTER_MAX = math.max(
+                0,
+                math.min(1, numberSetting("GPINATA_PACING_JITTER_MAX", 0.15))
+            ),
+            CALIBRATION = env.GPINATA_CALIBRATION ~= false,
+            CALIBRATION_PERSIST = env.GPINATA_CALIBRATION_PERSIST ~= false,
+            CALIBRATION_MIN_CYCLES = math.max(
+                100,
+                math.floor(numberSetting("GPINATA_CALIBRATION_MIN_CYCLES", 250))
+            ),
+            CALIBRATION_MIN_SECONDS = math.max(
+                600,
+                numberSetting("GPINATA_CALIBRATION_MIN_SECONDS", 1800)
+            ),
+            CALIBRATION_MAX_REJECT_RATE = math.max(
+                0,
+                numberSetting("GPINATA_CALIBRATION_MAX_REJECT_RATE", 0.03)
+            ),
+            AUTO_REMOTE = env.GPINATA_AUTO_REMOTE ~= false,
+            AUTO_REMOTE_RESOLVE_TIMEOUT = math.max(
+                5,
+                numberSetting("GPINATA_AUTO_REMOTE_RESOLVE_TIMEOUT", 30)
+            ),
             REMOTE_TIMEOUT = math.max(
                 3,
                 numberSetting("GPINATA_REMOTE_TIMEOUT", 8)
@@ -501,6 +663,10 @@ task.spawn(function()
         SETTINGS.ADAPTIVE_MAX_INTERVAL = math.max(
             SETTINGS.ADAPTIVE_MIN_INTERVAL,
             SETTINGS.ADAPTIVE_MAX_INTERVAL
+        )
+        SETTINGS.CIRCUIT_BREAKER_MAX_DELAY = math.max(
+            SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY,
+            SETTINGS.CIRCUIT_BREAKER_MAX_DELAY
         )
 
         local currentInterval = math.max(
@@ -544,35 +710,332 @@ task.spawn(function()
         local Client = Library:WaitForChild("Client")
         local Save = require(Client:WaitForChild("Save"))
         local MapCmds = nil
-        local ConsumeRemote = nil
+        local ConsumeEndpoint = nil
+        local lastResolvedEndpointLabel = nil
 
-        local function getConsumeRemote()
-            heartbeat("remote resolution")
+        local function executorFunction(name)
+            local candidate = rawget(env, name) or rawget(_G, name)
+            return type(candidate) == "function" and candidate or nil
+        end
 
-            if ConsumeRemote and ConsumeRemote.Parent then
-                return ConsumeRemote
+        local readCalibrationFile = executorFunction("readfile")
+        local writeCalibrationFile = executorFunction("writefile")
+        local calibrationFileName = string.format(
+            "mini_pinata_calibration_%s_%s_%s.json",
+            tostring(LocalPlayer and LocalPlayer.UserId or 0),
+            tostring(game.PlaceId),
+            tostring(SETTINGS.TARGET_ZONE)
+        )
+        local calibrationProfile = {
+            schema = 1,
+            userId = LocalPlayer and LocalPlayer.UserId or 0,
+            placeId = game.PlaceId,
+            placeVersion = game.PlaceVersion,
+            zone = SETTINGS.TARGET_ZONE,
+            recommendedInterval = currentInterval,
+            qualifiedCycles = 0,
+            qualifiedSeconds = 0,
+            sessions = 1,
+            updatedAt = 0,
+        }
+        local calibrationPersistent = SETTINGS.CALIBRATION
+            and SETTINGS.CALIBRATION_PERSIST
+            and readCalibrationFile ~= nil
+            and writeCalibrationFile ~= nil
+
+        local function loadCalibrationProfile()
+            if not calibrationPersistent then
+                dashboard.calibration = SETTINGS.CALIBRATION
+                    and "Session calibration"
+                    or "Calibration disabled"
+                return
             end
 
-            local Network = ReplicatedStorage:FindFirstChild("Network")
+            local readOk, encoded = pcall(readCalibrationFile, calibrationFileName)
 
-            if not Network then
-                Network = ReplicatedStorage:WaitForChild("Network", 30)
+            if not readOk or type(encoded) ~= "string" or encoded == "" then
+                dashboard.calibration = "New local profile"
+                return
             end
 
-            if not Network then
+            local decodeOk, decoded = pcall(
+                HttpService.JSONDecode,
+                HttpService,
+                encoded
+            )
+
+            if not decodeOk or type(decoded) ~= "table" then
+                dashboard.calibration = "Profile reset"
+                return
+            end
+
+            local recommended = tonumber(decoded.recommendedInterval)
+            local profileMatches = tonumber(decoded.userId) == calibrationProfile.userId
+                and tonumber(decoded.placeId) == calibrationProfile.placeId
+                and tonumber(decoded.zone) == calibrationProfile.zone
+
+            if not recommended or not profileMatches then
+                dashboard.calibration = "New local profile"
+                return
+            end
+
+            calibrationProfile = decoded
+            calibrationProfile.schema = 1
+            calibrationProfile.placeVersion = game.PlaceVersion
+            calibrationProfile.recommendedInterval = math.max(
+                SETTINGS.ADAPTIVE_MIN_INTERVAL,
+                math.min(SETTINGS.ADAPTIVE_MAX_INTERVAL, recommended)
+            )
+            calibrationProfile.sessions = math.max(
+                0,
+                tonumber(calibrationProfile.sessions) or 0
+            ) + 1
+            currentInterval = math.max(
+                currentInterval,
+                calibrationProfile.recommendedInterval
+            )
+            dashboard.calibration = string.format(
+                calibrationProfile.provisional
+                    and "Remembered protective %.2fs"
+                    or "Remembered %.2fs",
+                calibrationProfile.recommendedInterval
+            )
+        end
+
+        local function saveCalibrationProfile()
+            if not calibrationPersistent then
+                return false
+            end
+
+            calibrationProfile.placeVersion = game.PlaceVersion
+            calibrationProfile.updatedAt = os.time()
+            local encodeOk, encoded = pcall(
+                HttpService.JSONEncode,
+                HttpService,
+                calibrationProfile
+            )
+
+            if not encodeOk then
+                return false
+            end
+
+            local writeOk = pcall(
+                writeCalibrationFile,
+                calibrationFileName,
+                encoded
+            )
+            return writeOk
+        end
+
+        loadCalibrationProfile()
+        dashboard.interval = currentInterval
+        dashboard.hourly = 3600 / currentInterval
+        dashboard.daily = 86400 / currentInterval
+
+        local function normalizeRemoteName(value)
+            return type(value) == "string"
+                and string.lower(value):gsub("[^%w]", "")
+                or ""
+        end
+
+        local function remoteAliases()
+            local aliases = {
+                tostring(env.GPINATA_REMOTE_NAME or "MiniPinata_Consume"),
+                "MiniPinata_Consume",
+                "MiniPinataConsume",
+                "Mini Pinata Consume",
+            }
+            local configured = env.GPINATA_REMOTE_ALIASES
+
+            if type(configured) == "table" then
+                for _, alias in ipairs(configured) do
+                    if type(alias) == "string" and alias ~= "" then
+                        table.insert(aliases, alias)
+                    end
+                end
+            end
+
+            local unique = {}
+            local result = {}
+
+            for _, alias in ipairs(aliases) do
+                local normalized = normalizeRemoteName(alias)
+
+                if normalized ~= "" and not unique[normalized] then
+                    unique[normalized] = true
+                    table.insert(result, alias)
+                end
+            end
+
+            return result
+        end
+
+        local function endpointValid(endpoint)
+            if type(endpoint) ~= "table" then
+                return false
+            end
+
+            if endpoint.kind == "instance" then
+                return endpoint.remote
+                    and endpoint.remote.Parent
+                    and endpoint.remote:IsA("RemoteFunction")
+            end
+
+            return endpoint.kind == "network-wrapper"
+                and type(endpoint.invoke) == "function"
+        end
+
+        local function announceResolvedEndpoint(endpoint)
+            if not endpointValid(endpoint) then
+                return
+            end
+
+            dashboard.remote = endpoint.display
+
+            if endpoint.label == lastResolvedEndpointLabel then
+                return
+            end
+
+            lastResolvedEndpointLabel = endpoint.label
+            sendWebhook({
+                title = "Remote Route Resolved",
+                description = "The placement communication route was resolved and cached. Ordinary server rejections will not trigger rediscovery.",
+                color = endpoint.strategy == "Known route" and 5763719 or 16753920,
+                targetZone = SETTINGS.TARGET_ZONE,
+                fields = {
+                    webhookField("Resolution Strategy", endpoint.strategy, true),
+                    webhookField("Endpoint", endpoint.label, false),
+                    webhookField("Endpoint Type", endpoint.kind, true),
+                    webhookField("Resolve Mode", SETTINGS.AUTO_REMOTE and "Automatic fallback" or "Known route only", true),
+                },
+            })
+        end
+
+        local function findDirectEndpoint(network, aliases)
+            if not network then
                 return nil
             end
 
-            ConsumeRemote = Network:FindFirstChild("MiniPinata" .. "_Consume")
+            for index, alias in ipairs(aliases) do
+                local candidate = network:FindFirstChild(alias, true)
 
-            if not ConsumeRemote then
-                ConsumeRemote = Network:WaitForChild("MiniPinata" .. "_Consume", 30)
+                if candidate and candidate:IsA("RemoteFunction") then
+                    return {
+                        kind = "instance",
+                        remote = candidate,
+                        label = candidate:GetFullName(),
+                        display = index == 1 and "Known remote" or "Alias remote",
+                        strategy = index == 1 and "Known route" or "Configured alias",
+                    }
+                end
             end
 
-            return ConsumeRemote
+            if not SETTINGS.AUTO_REMOTE then
+                return nil
+            end
+
+            for _, candidate in ipairs(network:GetDescendants()) do
+                if candidate:IsA("RemoteFunction") then
+                    local normalized = normalizeRemoteName(candidate.Name)
+                    local mentionsMiniPinata = string.find(
+                        normalized,
+                        "minipinata",
+                        1,
+                        true
+                    ) ~= nil
+                    local looksConsumptive = string.find(
+                        normalized,
+                        "consume",
+                        1,
+                        true
+                    ) ~= nil
+                        or string.find(normalized, "activate", 1, true) ~= nil
+                        or string.find(normalized, "use", 1, true) ~= nil
+
+                    if mentionsMiniPinata and looksConsumptive then
+                        return {
+                            kind = "instance",
+                            remote = candidate,
+                            label = candidate:GetFullName(),
+                            display = "Discovered remote",
+                            strategy = "Signature scan",
+                        }
+                    end
+                end
+            end
+
+            return nil
         end
 
-        local function invokeConsumeWithTimeout(remote, uid)
+        local function findNetworkWrapperEndpoint(aliases)
+            if not SETTINGS.AUTO_REMOTE then
+                return nil
+            end
+
+            local moduleScript = Client:FindFirstChild("Network")
+
+            if not moduleScript then
+                return nil
+            end
+
+            local requireOk, module = pcall(require, moduleScript)
+
+            if not requireOk or type(module) ~= "table" then
+                return nil
+            end
+
+            local invoke = module.Invoke or module.invoke
+
+            if type(invoke) ~= "function" then
+                return nil
+            end
+
+            return {
+                kind = "network-wrapper",
+                invoke = invoke,
+                action = aliases[1],
+                label = moduleScript:GetFullName() .. " → " .. aliases[1],
+                display = "Client network wrapper",
+                strategy = "PS99 client network",
+            }
+        end
+
+        local function getConsumeEndpoint()
+            heartbeat("remote resolution")
+
+            if endpointValid(ConsumeEndpoint) then
+                return ConsumeEndpoint
+            end
+
+            ConsumeEndpoint = nil
+            dashboard.remote = "Resolving"
+            local aliases = remoteAliases()
+            local deadline = os.clock() + SETTINGS.AUTO_REMOTE_RESOLVE_TIMEOUT
+
+            repeat
+                heartbeat("remote resolution")
+                local network = ReplicatedStorage:FindFirstChild("Network")
+                local endpoint = findDirectEndpoint(network, aliases)
+
+                if not endpoint then
+                    endpoint = findNetworkWrapperEndpoint(aliases)
+                end
+
+                if endpoint then
+                    ConsumeEndpoint = endpoint
+                    announceResolvedEndpoint(endpoint)
+                    return endpoint
+                end
+
+                task.wait(0.5)
+            until os.clock() >= deadline
+                or env.STOP_MINI_PINATA_FAST_PLACER
+
+            dashboard.remote = "Unresolved"
+            return nil
+        end
+
+        local function invokeConsumeWithTimeout(endpoint, uid)
             heartbeat("remote invocation")
 
             local completed = false
@@ -581,7 +1044,11 @@ task.spawn(function()
 
             local invokeThread = task.spawn(function()
                 local ok, result = pcall(function()
-                    return remote:InvokeServer(uid)
+                    if endpoint.kind == "instance" then
+                        return endpoint.remote:InvokeServer(uid)
+                    end
+
+                    return endpoint.invoke(endpoint.action, uid)
                 end)
 
                 callOk = ok
@@ -679,6 +1146,8 @@ task.spawn(function()
             local waitStartedAt = os.clock()
             local isRecovery = farmReadyCount > 0
 
+            dashboard.state = isRecovery and "Paused" or "Booting"
+
             print(string.format(
                 "[Runtime] Waiting for GScript farming area for target zone %d.",
                 SETTINGS.TARGET_ZONE
@@ -727,6 +1196,10 @@ task.spawn(function()
 
                     if positionReady and startupReady then
                         print("[Runtime] Farming area stable; placement enabled.")
+
+                        dashboard.state = SETTINGS.CALIBRATION
+                            and "Calibrating"
+                            or "Running"
 
                         farmReadyCount += 1
 
@@ -818,12 +1291,96 @@ task.spawn(function()
             ) or 1
         end
 
+        local function currencyAmount(value)
+            if type(value) == "number" then
+                return value
+            end
+
+            if type(value) ~= "table" then
+                return nil
+            end
+
+            return tonumber(
+                value._am
+                or value.am
+                or value.amount
+                or value.Amount
+                or value.quantity
+                or value.Quantity
+                or value.value
+                or value.Value
+            )
+        end
+
+        local function findGemCount(data)
+            if type(data) ~= "table" then
+                return nil
+            end
+
+            for _, key in ipairs({ "Diamonds", "diamonds", "Gems", "gems" }) do
+                local direct = currencyAmount(data[key])
+
+                if direct then
+                    return direct
+                end
+            end
+
+            local inventory = type(data.Inventory) == "table"
+                and data.Inventory
+                or nil
+            local containers = {
+                data.Currency,
+                data.Currencies,
+                data.currency,
+                data.currencies,
+                inventory and inventory.Currency,
+                inventory and inventory.Currencies,
+            }
+
+            for _, container in ipairs(containers) do
+                if type(container) == "table" then
+                    for key, value in pairs(container) do
+                        local keyName = normalize(key)
+                        local itemName = type(value) == "table"
+                            and normalize(
+                                value.id
+                                or value._id
+                                or value.ID
+                                or value.Name
+                                or value.name
+                            )
+                            or ""
+
+                        if keyName == "diamonds"
+                            or keyName == "gems"
+                            or itemName == "diamonds"
+                            or itemName == "gems"
+                        then
+                            local amount = currencyAmount(value)
+
+                            if amount then
+                                return amount
+                            end
+                        end
+                    end
+                end
+            end
+
+            return nil
+        end
+
         local function findItemStack()
             local data = getSaveData()
             local inventory = data and data.Inventory
             local misc = inventory and inventory.Misc
+            local gems = findGemCount(data)
+
+            if gems ~= nil then
+                dashboard.gems = gems
+            end
 
             if type(misc) ~= "table" then
+                dashboard.pinatas = nil
                 return nil, 0, false
             end
 
@@ -853,6 +1410,8 @@ task.spawn(function()
                     end
                 end
             end
+
+            dashboard.pinatas = total
 
             return selectedUid, total, true
         end
@@ -917,6 +1476,8 @@ task.spawn(function()
         if not initialUid then
             if inventoryReady then
                 print("[Runtime] No Mini Pinatas were found; engine stopped cleanly.")
+                dashboard.state = "Stopped"
+                dashboard.pinatas = 0
                 sendWebhook({
                     title = "No Mini Pinatas Available",
                     description = "The engine stopped cleanly because this account had no Mini Pinatas when inventory became available.",
@@ -942,6 +1503,8 @@ task.spawn(function()
         if not initialUid then
             if inventoryReady then
                 print("[Runtime] No Mini Pinatas remain; engine stopped cleanly.")
+                dashboard.state = "Stopped"
+                dashboard.pinatas = 0
                 sendWebhook({
                     title = "No Mini Pinatas Available",
                     description = "The engine stopped cleanly because the inventory contained no Mini Pinatas after farming began.",
@@ -958,14 +1521,30 @@ task.spawn(function()
             error("[Runtime] Inventory was unavailable after farming began.")
         end
 
-        if not getConsumeRemote() then
-            error("[Runtime] Consume remote was not found.")
+        if not getConsumeEndpoint() then
+            error("[Runtime] Consume endpoint could not be resolved.")
         end
 
         applyFpsCap()
 
         if not waitForAccountPhase() then
             return "stopped"
+        end
+
+        dashboard.state = SETTINGS.CALIBRATION and "Calibrating" or "Running"
+        dashboard.pinatas = initialTotal
+        dashboard.interval = currentInterval
+        dashboard.hourly = 3600 / currentInterval
+        dashboard.daily = 86400 / currentInterval
+
+        if SETTINGS.CALIBRATION
+            and string.find(dashboard.calibration, "Remembered", 1, true) == nil
+        then
+            dashboard.calibration = string.format(
+                "Testing %.2fs • 0/%d",
+                currentInterval,
+                SETTINGS.CALIBRATION_MIN_CYCLES
+            )
         end
 
         if SETTINGS.ADAPTIVE then
@@ -1008,7 +1587,22 @@ task.spawn(function()
                         or "Disabled",
                     true
                 ),
-                webhookField("Adaptive Window", string.format("%d cycles", SETTINGS.ADAPTIVE_WINDOW), true),
+                webhookField("Pressure Window", string.format("%d cycles", SETTINGS.ADAPTIVE_WINDOW), true),
+                webhookField("Recovery Window", string.format("%d cycles", SETTINGS.ADAPTIVE_LONG_WINDOW), true),
+                webhookField("Recovery Hold", formatDuration(SETTINGS.ADAPTIVE_RECOVERY_HOLD), true),
+                webhookField(
+                    "Calibration",
+                    SETTINGS.CALIBRATION
+                        and string.format(
+                            "%d cycles + %s",
+                            SETTINGS.CALIBRATION_MIN_CYCLES,
+                            formatDuration(SETTINGS.CALIBRATION_MIN_SECONDS)
+                        )
+                        or "Disabled",
+                    true
+                ),
+                webhookField("Calibration Storage", calibrationPersistent and "Persistent" or "Session only", true),
+                webhookField("Auto-Remote", SETTINGS.AUTO_REMOTE and "Fallback enabled" or "Known route only", true),
                 webhookField(
                     "Retry Policy",
                     string.format(
@@ -1038,6 +1632,9 @@ task.spawn(function()
         local rejected = 0
         local rejectedStreak = 0
         local rejectionAlertActive = false
+        local circuitBreakerActive = false
+        local circuitBreakerDelay = SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY
+        local circuitBreakerTrips = 0
         local failedCycles = 0
         local errors = 0
         local timeouts = 0
@@ -1047,10 +1644,164 @@ task.spawn(function()
         local lastKnownTotal = initialTotal
         local noItemsRemain = false
 
+        local calibrationSegmentStartedAt = os.clock()
+        local calibrationSegmentInterval = currentInterval
+        local calibrationSegmentCycles = 0
+        local calibrationSegmentRejected = 0
+        local calibrationSegmentFailed = 0
+        local calibrationSegmentSecondRetries = 0
+        local calibrationSegmentContaminated = false
+        local calibrationSegmentQualified = false
+        local calibrationBlockedUntil = 0
+
+        local function resetCalibrationSegment(reason)
+            calibrationSegmentStartedAt = os.clock()
+            calibrationSegmentInterval = currentInterval
+            calibrationSegmentCycles = 0
+            calibrationSegmentRejected = 0
+            calibrationSegmentFailed = 0
+            calibrationSegmentSecondRetries = 0
+            calibrationSegmentContaminated = false
+            calibrationSegmentQualified = false
+            calibrationBlockedUntil = 0
+
+            if SETTINGS.CALIBRATION then
+                dashboard.calibration = string.format(
+                    "Testing %.2fs • 0/%d",
+                    currentInterval,
+                    SETTINGS.CALIBRATION_MIN_CYCLES
+                )
+            end
+
+            if SETTINGS.VERBOSE and reason then
+                print("[Runtime] Calibration reset: " .. tostring(reason))
+            end
+        end
+
+        local function recordCalibrationSample(
+            cycleConfirmed,
+            cycleRejected,
+            usedSecondRetry
+        )
+            if not SETTINGS.CALIBRATION then
+                return
+            end
+
+            if circuitBreakerActive then
+                calibrationSegmentContaminated = true
+                calibrationBlockedUntil = math.max(
+                    calibrationBlockedUntil,
+                    os.clock() + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                )
+                dashboard.calibration = "Excluded stuck-area episode"
+                return
+            end
+
+            if calibrationSegmentContaminated
+                and os.clock() >= calibrationBlockedUntil
+                and cycleConfirmed
+            then
+                resetCalibrationSegment("contaminated evidence expired")
+            end
+
+            if math.abs(calibrationSegmentInterval - currentInterval) >= 0.001 then
+                resetCalibrationSegment("interval changed")
+            end
+
+            calibrationSegmentCycles += 1
+
+            if cycleRejected then
+                calibrationSegmentRejected += 1
+            end
+
+            if not cycleConfirmed then
+                calibrationSegmentFailed += 1
+                calibrationSegmentContaminated = true
+                calibrationBlockedUntil = math.max(
+                    calibrationBlockedUntil,
+                    os.clock() + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                )
+            end
+
+            if usedSecondRetry then
+                calibrationSegmentSecondRetries += 1
+                calibrationSegmentContaminated = true
+                calibrationBlockedUntil = math.max(
+                    calibrationBlockedUntil,
+                    os.clock() + SETTINGS.ADAPTIVE_RECOVERY_HOLD
+                )
+            end
+
+            local elapsed = os.clock() - calibrationSegmentStartedAt
+            local rejectRate = calibrationSegmentCycles > 0
+                and calibrationSegmentRejected / calibrationSegmentCycles
+                or 0
+            dashboard.calibration = string.format(
+                "Testing %.2fs • %d/%d",
+                currentInterval,
+                math.min(
+                    calibrationSegmentCycles,
+                    SETTINGS.CALIBRATION_MIN_CYCLES
+                ),
+                SETTINGS.CALIBRATION_MIN_CYCLES
+            )
+
+            local qualifies = not calibrationSegmentQualified
+                and not calibrationSegmentContaminated
+                and calibrationSegmentCycles >= SETTINGS.CALIBRATION_MIN_CYCLES
+                and elapsed >= SETTINGS.CALIBRATION_MIN_SECONDS
+                and rejectRate <= SETTINGS.CALIBRATION_MAX_REJECT_RATE
+
+            if not qualifies then
+                return
+            end
+
+            calibrationSegmentQualified = true
+            calibrationProfile.recommendedInterval = currentInterval
+            calibrationProfile.qualifiedCycles = calibrationSegmentCycles
+            calibrationProfile.qualifiedSeconds = math.floor(elapsed)
+            calibrationProfile.rejectRate = rejectRate
+            calibrationProfile.failedCycles = calibrationSegmentFailed
+            calibrationProfile.secondRetries = calibrationSegmentSecondRetries
+            calibrationProfile.provisional = false
+            local saved = saveCalibrationProfile()
+            dashboard.calibration = string.format(
+                "%s %.2fs • %d clean",
+                saved and "Remembered" or "Qualified",
+                currentInterval,
+                calibrationSegmentCycles
+            )
+            dashboard.state = "Running"
+
+            sendWebhook({
+                title = saved
+                    and "Account Calibration Remembered"
+                    or "Account Calibration Qualified",
+                description = saved
+                    and "This account and area sustained the current placement interval long enough to use it as the starting recommendation after future Volt relaunches."
+                    or "The interval passed sustained calibration, but persistent executor file storage was unavailable; it can only be used during this client session.",
+                color = 5763719,
+                targetZone = SETTINGS.TARGET_ZONE,
+                fields = {
+                    webhookField("Qualified Interval", string.format("%.2f seconds", currentInterval), true),
+                    webhookField("Evidence", string.format("%d cycles • %s", calibrationSegmentCycles, formatDuration(elapsed)), true),
+                    webhookField("Initial Rejection Rate", string.format("%.2f%%", rejectRate * 100), true),
+                    webhookField("Failed Cycles", calibrationSegmentFailed, true),
+                    webhookField("Second Retries", calibrationSegmentSecondRetries, true),
+                    webhookField("Profile Scope", string.format("Account %s • Area %d", tostring(LocalPlayer.UserId), SETTINGS.TARGET_ZONE), false),
+                },
+            })
+        end
+
         local function recordConfirmation(amountUsed, totalAfter)
             local firstConfirmation = confirmed == 0
             confirmed += amountUsed
             lastKnownTotal = totalAfter or math.max(0, lastKnownTotal - amountUsed)
+            dashboard.pinatas = lastKnownTotal
+            local elapsed = math.max(1, os.clock() - placementRunStartedAt)
+            dashboard.hourly = confirmed / elapsed * 3600
+            dashboard.daily = dashboard.hourly * 24
+            dashboard.successRate = cycles > 0 and confirmed / cycles * 100 or 100
 
             if firstConfirmation or SETTINGS.VERBOSE then
                 print(string.format(
@@ -1082,6 +1833,18 @@ task.spawn(function()
                 and confirmed / remoteCalls * 100
                 or 0
             local recoveryRate = recoveredCycles / cycles * 100
+            dashboard.interval = currentInterval
+            dashboard.hourly = acceptedPerHour
+            dashboard.daily = projectedPerDay
+            dashboard.successRate = successRate
+
+            if circuitBreakerActive then
+                dashboard.state = "Circuit"
+            elseif SETTINGS.CALIBRATION and not calibrationSegmentQualified then
+                dashboard.state = "Calibrating"
+            else
+                dashboard.state = "Running"
+            end
 
             if shouldPrint then
                 print(string.format(
@@ -1110,42 +1873,92 @@ task.spawn(function()
             end
 
             if shouldWebhook then
+                local initialAccepted = math.max(
+                    0,
+                    cycles - recoveredCycles - failedCycles
+                )
+                local initialPassRate = cycles > 0
+                    and initialAccepted / cycles * 100
+                    or 0
                 sendWebhook({
                     title = "Placement Status - " .. formatInteger(cycles) .. " Cycles",
-                    description = "Scheduled operational summary for this account's current placement run.",
+                    description = "A compact health report for the current placement run. The dashboard above always reflects live gems, remaining piñatas, interval and observed placement speed.",
                     color = failedCycles == 0 and recoveryRate < 5
                         and 3447003
                         or 16753920,
                     targetZone = SETTINGS.TARGET_ZONE,
                     fields = {
-                        webhookField("Run Uptime", formatDuration(elapsed), true),
-                        webhookField("Placement Cycles", formatInteger(cycles), true),
-                        webhookField("Confirmed Placements", formatInteger(confirmed), true),
-                        webhookField("Cycle Success Rate", string.format("%.2f%%", successRate), true),
-                        webhookField("Remote Calls", formatInteger(remoteCalls), true),
-                        webhookField("Call Efficiency", string.format("%.2f%%", callEfficiency), true),
-                        webhookField("Retries", formatInteger(retries), true),
-                        webhookField("Recovered-Cycle Rate", string.format("%.2f%%", recoveryRate), true),
                         webhookField(
-                            "Retry Recovery Details",
+                            "⚡ Placement Performance",
                             string.format(
-                                "Recovered cycles: %s | First retry: %s | Second retry: %s | Late confirmation: %s",
+                                "**%s/%s confirmed** — %.2f%%\n**%.1f/hour** — %.0f/day\nCurrent interval: **%.2fs**",
+                                formatInteger(confirmed),
+                                formatInteger(cycles),
+                                successRate,
+                                acceptedPerHour,
+                                projectedPerDay,
+                                currentInterval
+                            ),
+                            false
+                        ),
+                        webhookField(
+                            "🛡️ Consistency",
+                            string.format(
+                                "First-pass acceptance: **%.2f%%**\nCall efficiency: **%.2f%%**\nRejections: %s • Failed cycles: %s",
+                                initialPassRate,
+                                callEfficiency,
+                                formatInteger(rejected),
+                                formatInteger(failedCycles)
+                            ),
+                            false
+                        ),
+                        webhookField(
+                            "🔁 Recovery",
+                            string.format(
+                                "Recovered: %s (%.2f%%)\nRetry 1: %s • Retry 2: %s • Late: %s",
                                 formatInteger(recoveredCycles),
+                                recoveryRate,
                                 formatInteger(firstRetryRecoveries),
                                 formatInteger(secondRetryRecoveries),
                                 formatInteger(lateConfirmations)
                             ),
                             false
                         ),
-                        webhookField("Server Rejections", formatInteger(rejected), true),
-                        webhookField("Failed Cycles", formatInteger(failedCycles), true),
-                        webhookField("Current Reject Streak", formatInteger(rejectedStreak), true),
-                        webhookField("Remote Errors", formatInteger(errors), true),
-                        webhookField("Remote Timeouts", formatInteger(timeouts), true),
-                        webhookField("Current Interval", string.format("%.2f seconds", currentInterval), true),
-                        webhookField("Actual Throughput", string.format("%.1f/hour | %.0f/day", acceptedPerHour, projectedPerDay), true),
-                        webhookField("Inventory Remaining", formatInteger(lastKnownTotal), true),
-                        webhookField("Last Server Response", tostring(lastResponse), false),
+                        webhookField(
+                            "🧠 Account Calibration",
+                            tostring(dashboard.calibration)
+                                .. "\nCircuit: "
+                                .. (
+                                    circuitBreakerActive
+                                        and string.format("ACTIVE — %.0fs probe", circuitBreakerDelay)
+                                        or "inactive"
+                                )
+                                .. " • Trips: "
+                                .. formatInteger(circuitBreakerTrips),
+                            false
+                        ),
+                        webhookField(
+                            "📡 Communication Health",
+                            string.format(
+                                "%s\nCalls: %s • Errors: %s • Timeouts: %s\nLast response: `%s`",
+                                tostring(dashboard.remote),
+                                formatInteger(remoteCalls),
+                                formatInteger(errors),
+                                formatInteger(timeouts),
+                                tostring(lastResponse)
+                            ),
+                            false
+                        ),
+                        webhookField(
+                            "🕒 Run Snapshot",
+                            string.format(
+                                "Run uptime: %s\nClient uptime: %s\nRemaining supply: %s",
+                                formatDuration(elapsed),
+                                formatDuration(os.clock() - bootStartedAt),
+                                formatInteger(lastKnownTotal)
+                            ),
+                            false
+                        ),
                     },
                 })
             end
@@ -1166,14 +1979,81 @@ task.spawn(function()
         local adaptiveWindowCycles = 0
         local adaptiveWindowRejected = 0
         local adaptiveWindowFailed = 0
-        local adaptiveStableWindows = 0
         local adaptivePressureWindows = 0
+        local adaptiveHistory = {}
+        local adaptiveHistoryRejected = 0
+        local adaptiveHistoryFailed = 0
+        local adaptiveHistorySecondRetries = 0
+        local adaptiveRecoveryNotBefore = os.clock()
 
-        local function updateAdaptiveRate(cycleConfirmed, cycleRejected)
+        local function clearAdaptiveHistory()
+            adaptiveHistory = {}
+            adaptiveHistoryRejected = 0
+            adaptiveHistoryFailed = 0
+            adaptiveHistorySecondRetries = 0
+        end
+
+        local function pushAdaptiveHistory(cycleConfirmed, cycleRejected, usedSecondRetry)
+            local sample = {
+                rejected = cycleRejected == true,
+                failed = cycleConfirmed ~= true,
+                secondRetry = usedSecondRetry == true,
+            }
+
+            table.insert(adaptiveHistory, sample)
+
+            if sample.rejected then
+                adaptiveHistoryRejected += 1
+            end
+
+            if sample.failed then
+                adaptiveHistoryFailed += 1
+            end
+
+            if sample.secondRetry then
+                adaptiveHistorySecondRetries += 1
+            end
+
+            while #adaptiveHistory > SETTINGS.ADAPTIVE_LONG_WINDOW do
+                local removed = table.remove(adaptiveHistory, 1)
+
+                if removed.rejected then
+                    adaptiveHistoryRejected -= 1
+                end
+
+                if removed.failed then
+                    adaptiveHistoryFailed -= 1
+                end
+
+                if removed.secondRetry then
+                    adaptiveHistorySecondRetries -= 1
+                end
+            end
+        end
+
+        local function updateAdaptiveRate(cycleConfirmed, cycleRejected, usedSecondRetry)
             if not SETTINGS.ADAPTIVE then
                 return
             end
 
+            -- Consecutive complete failures are handled by the circuit
+            -- breaker. They are more consistent with an occupied/stuck area
+            -- than a sustainable-rate problem, so do not let them teach the
+            -- normal interval controller the wrong lesson.
+            if circuitBreakerActive then
+                adaptiveWindowCycles = 0
+                adaptiveWindowRejected = 0
+                adaptiveWindowFailed = 0
+                adaptivePressureWindows = 0
+                adaptiveRecoveryNotBefore = math.max(
+                    adaptiveRecoveryNotBefore,
+                    os.clock() + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                )
+                clearAdaptiveHistory()
+                return
+            end
+
+            pushAdaptiveHistory(cycleConfirmed, cycleRejected, usedSecondRetry)
             adaptiveWindowCycles += 1
 
             if cycleRejected then
@@ -1191,22 +2071,32 @@ task.spawn(function()
             local previousInterval = currentInterval
             local rejectRate = adaptiveWindowRejected / adaptiveWindowCycles
             local adjustmentReason = nil
+            local pressureDetected = false
+            local now = os.clock()
+            local historyCycles = #adaptiveHistory
+            local historyRejectRate = historyCycles > 0
+                and adaptiveHistoryRejected / historyCycles
+                or 0
 
             if adaptiveWindowFailed > 0 then
+                pressureDetected = true
                 currentInterval = math.min(
                     SETTINGS.ADAPTIVE_MAX_INTERVAL,
                     currentInterval
                         + SETTINGS.ADAPTIVE_STEP_UP
                         * math.min(2, adaptiveWindowFailed)
                 )
-                adaptiveStableWindows = 0
                 adaptivePressureWindows = 0
+                adaptiveRecoveryNotBefore = math.max(
+                    adaptiveRecoveryNotBefore,
+                    now + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                )
                 adjustmentReason = adaptiveWindowFailed == 1
                     and "unrecovered failed cycle"
                     or "multiple unrecovered failed cycles"
             elseif rejectRate >= SETTINGS.ADAPTIVE_HIGH_REJECT_RATE then
+                pressureDetected = true
                 adaptivePressureWindows += 1
-                adaptiveStableWindows = 0
 
                 if adaptivePressureWindows >= SETTINGS.ADAPTIVE_PRESSURE_WINDOWS then
                     currentInterval = math.min(
@@ -1218,19 +2108,48 @@ task.spawn(function()
                 end
             else
                 adaptivePressureWindows = 0
-                adaptiveStableWindows += 1
+            end
 
-                if adaptiveStableWindows >= SETTINGS.ADAPTIVE_STABLE_WINDOWS then
-                    currentInterval = math.max(
-                        SETTINGS.ADAPTIVE_MIN_INTERVAL,
-                        currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN
-                    )
-                    adaptiveStableWindows = 0
-                    adjustmentReason = "stable recovery"
-                end
+            local changedByPressure = currentInterval > previousInterval
+
+            if changedByPressure then
+                adaptiveRecoveryNotBefore = math.max(
+                    adaptiveRecoveryNotBefore,
+                    now + SETTINGS.ADAPTIVE_RECOVERY_HOLD
+                )
+            end
+
+            local longWindowReady = historyCycles >= SETTINGS.ADAPTIVE_LONG_WINDOW
+            local recoveryEvidenceClean = longWindowReady
+                and adaptiveHistoryFailed == 0
+                and adaptiveHistorySecondRetries
+                    <= SETTINGS.ADAPTIVE_RECOVERY_MAX_SECOND_RETRIES
+                and historyRejectRate
+                    <= SETTINGS.ADAPTIVE_RECOVERY_MAX_REJECT_RATE
+            local recoveryHoldComplete = now >= adaptiveRecoveryNotBefore
+
+            -- Short windows are permitted to slow the engine only. A speed
+            -- recovery requires a full long window collected at the current
+            -- interval plus the time hold. History is reset after every rate
+            -- change, so each faster step must prove itself independently.
+            if not pressureDetected
+                and math.abs(currentInterval - previousInterval) < 0.001
+                and currentInterval > SETTINGS.ADAPTIVE_MIN_INTERVAL
+                and recoveryEvidenceClean
+                and recoveryHoldComplete
+            then
+                currentInterval = math.max(
+                    SETTINGS.ADAPTIVE_MIN_INTERVAL,
+                    currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN
+                )
+                adjustmentReason = "long-window stable recovery"
             end
 
             if math.abs(currentInterval - previousInterval) >= 0.001 then
+                dashboard.interval = currentInterval
+                dashboard.hourly = 3600 / currentInterval
+                dashboard.daily = 86400 / currentInterval
+                resetCalibrationSegment("adaptive interval adjustment")
                 print(string.format(
                     "[Runtime] Adaptive | %.2fs -> %.2fs | %s "
                         .. "| rejected %d/%d | failed %d",
@@ -1243,10 +2162,37 @@ task.spawn(function()
                 ))
 
                 local slowedDown = currentInterval > previousInterval
+                local protectiveProfileSaved = false
+
+                if slowedDown
+                    and SETTINGS.CALIBRATION
+                    and currentInterval > (
+                        tonumber(calibrationProfile.recommendedInterval)
+                            or SETTINGS.ADAPTIVE_MIN_INTERVAL
+                    )
+                then
+                    calibrationProfile.recommendedInterval = currentInterval
+                    calibrationProfile.provisional = true
+                    calibrationProfile.provisionalReason = adjustmentReason
+                    calibrationProfile.qualifiedCycles = 0
+                    calibrationProfile.qualifiedSeconds = 0
+                    protectiveProfileSaved = saveCalibrationProfile()
+                    dashboard.calibration = string.format(
+                        "%s protective %.2fs",
+                        protectiveProfileSaved and "Remembered" or "Session",
+                        currentInterval
+                    )
+                end
+
                 local windowConfirmed = adaptiveWindowCycles - adaptiveWindowFailed
                 local cumulativeSuccessRate = cycles > 0
                     and confirmed / cycles * 100
                     or 0
+                local holdSeconds = slowedDown and (
+                    adaptiveWindowFailed > 0
+                        and SETTINGS.ADAPTIVE_FAILURE_HOLD
+                        or SETTINGS.ADAPTIVE_RECOVERY_HOLD
+                ) or SETTINGS.ADAPTIVE_RECOVERY_HOLD
 
                 sendWebhook({
                     title = slowedDown
@@ -1255,8 +2201,8 @@ task.spawn(function()
                     description = slowedDown
                         and "The controller detected placement pressure and increased the interval to protect long-run consistency."
                         or string.format(
-                            "%d stable observation window(s) allowed the controller to move closer to the %.2f-second target.",
-                            SETTINGS.ADAPTIVE_STABLE_WINDOWS,
+                            "%d stable cycles plus the recovery hold allowed one cautious step toward the %.2f-second target.",
+                            SETTINGS.ADAPTIVE_LONG_WINDOW,
                             SETTINGS.ADAPTIVE_MIN_INTERVAL
                         ),
                     color = slowedDown and 16753920 or 5763719,
@@ -1270,6 +2216,30 @@ task.spawn(function()
                         webhookField("Cycles With Rejections", string.format("%d/%d", adaptiveWindowRejected, adaptiveWindowCycles), true),
                         webhookField("Window Rejection Rate", string.format("%.2f%%", rejectRate * 100), true),
                         webhookField("Failed Cycles", adaptiveWindowFailed, true),
+                        webhookField(
+                            "Long Recovery Evidence",
+                            string.format(
+                                "%d/%d cycles | %.2f%% rejected | %d failed | %d second retries",
+                                historyCycles,
+                                SETTINGS.ADAPTIVE_LONG_WINDOW,
+                                historyRejectRate * 100,
+                                adaptiveHistoryFailed,
+                                adaptiveHistorySecondRetries
+                            ),
+                            false
+                        ),
+                        webhookField("Next Recovery Hold", formatDuration(holdSeconds), true),
+                        webhookField(
+                            "Calibration Memory",
+                            slowedDown
+                                and (
+                                    protectiveProfileSaved
+                                        and "Protective interval saved for the next relaunch"
+                                        or "Protective interval active for this session"
+                                )
+                                or "Faster interval must complete full calibration before being remembered",
+                            false
+                        ),
                         webhookField(
                             "Pressure Rule",
                             string.format(
@@ -1285,6 +2255,12 @@ task.spawn(function()
                         webhookField("Allowed Range", string.format("%.2f-%.2f seconds", SETTINGS.ADAPTIVE_MIN_INTERVAL, SETTINGS.ADAPTIVE_MAX_INTERVAL), true),
                     },
                 })
+
+                adaptiveRecoveryNotBefore = math.max(
+                    adaptiveRecoveryNotBefore,
+                    now + holdSeconds
+                )
+                clearAdaptiveHistory()
             end
 
             adaptiveWindowCycles = 0
@@ -1294,17 +2270,43 @@ task.spawn(function()
 
         local function clearRejectionStreak()
             local recoveredStreak = rejectedStreak
+            local recoveredFromCircuit = circuitBreakerActive
+            local recoveredCircuitDelay = circuitBreakerDelay
             rejectedStreak = 0
+            circuitBreakerActive = false
+            circuitBreakerDelay = SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY
 
-            if rejectionAlertActive then
+            if recoveredFromCircuit then
+                adaptiveRecoveryNotBefore = math.max(
+                    adaptiveRecoveryNotBefore,
+                    os.clock() + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                )
+                clearAdaptiveHistory()
+                resetCalibrationSegment("circuit breaker recovered")
+                dashboard.state = "Calibrating"
+            end
+
+            if rejectionAlertActive or recoveredFromCircuit then
                 sendWebhook({
-                    title = "Server Rejection Streak Recovered",
-                    description = "The server accepted placement again. Temporary rejection backoff has been cleared.",
+                    title = recoveredFromCircuit
+                        and "Circuit Breaker Recovered"
+                        or "Server Rejection Streak Recovered",
+                    description = recoveredFromCircuit
+                        and "A controlled diagnostic probe was accepted. Normal placement has resumed at the protected interval, while speed recovery remains locked."
+                        or "The server accepted placement again. Temporary rejection backoff has been cleared.",
                     color = 5763719,
                     targetZone = SETTINGS.TARGET_ZONE,
                     fields = {
                         webhookField("Recovered Streak", formatInteger(recoveredStreak), true),
+                        webhookField("Last Probe Delay", string.format("%.0f seconds", recoveredCircuitDelay), true),
                         webhookField("Current Interval", string.format("%.2f seconds", currentInterval), true),
+                        webhookField(
+                            "Speed Recovery Locked",
+                            recoveredFromCircuit
+                                and formatDuration(SETTINGS.ADAPTIVE_FAILURE_HOLD)
+                                or "No",
+                            true
+                        ),
                         webhookField("Confirmed Placements", formatInteger(confirmed), true),
                         webhookField("Failed Cycles", formatInteger(failedCycles), true),
                         webhookField("Remote Errors", formatInteger(errors), true),
@@ -1317,6 +2319,38 @@ task.spawn(function()
         end
 
         local function alertOnRejectionStreak()
+            if rejectedStreak >= SETTINGS.CIRCUIT_BREAKER_AFTER
+                and not circuitBreakerActive
+            then
+                circuitBreakerActive = true
+                circuitBreakerDelay = SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY
+                circuitBreakerTrips += 1
+                rejectionAlertActive = true
+                calibrationSegmentContaminated = true
+                dashboard.state = "Circuit"
+                dashboard.calibration = "Excluded stuck-area episode"
+
+                sendWebhook({
+                    title = "Placement Circuit Breaker Engaged",
+                    description = "Consecutive complete placement failures look more like an occupied/stuck area than ordinary timing pressure. Rapid placement has paused; the engine will use increasingly spaced diagnostic probes.",
+                    color = 15548997,
+                    targetZone = SETTINGS.TARGET_ZONE,
+                    critical = true,
+                    fields = {
+                        webhookField("Consecutive Failed Cycles", formatInteger(rejectedStreak), true),
+                        webhookField("First Probe In", string.format("%.0f seconds", circuitBreakerDelay), true),
+                        webhookField("Maximum Probe Delay", string.format("%.0f seconds", SETTINGS.CIRCUIT_BREAKER_MAX_DELAY), true),
+                        webhookField("Adaptive Interval", string.format("%.2f seconds", currentInterval), true),
+                        webhookField("Circuit Trips", formatInteger(circuitBreakerTrips), true),
+                        webhookField("Total Server Rejections", formatInteger(rejected), true),
+                        webhookField("Total Failed Cycles", formatInteger(failedCycles + 1), true),
+                        webhookField("Last Server Response", tostring(lastResponse), true),
+                        webhookField("Suggested Check", "If probes remain rejected, inspect the configured farming area for an invisible or stuck event.", false),
+                    },
+                })
+                return
+            end
+
             if rejectionAlertActive
                 or rejectedStreak < SETTINGS.WEBHOOK_ALERT_REJECT_STREAK
             then
@@ -1365,7 +2399,7 @@ task.spawn(function()
             local lostFarmArea = false
             local nextAttemptAt = os.clock()
             local cycleHadServerReject = false
-            local intervalAtCycleStart = currentInterval
+            local cycleUsedSecondRetry = false
             local cycleRetryLimit = rejectedStreak >= SETTINGS.RETRY_DISABLE_AFTER
                 and 0
                 or SETTINGS.MAX_RETRIES
@@ -1415,18 +2449,21 @@ task.spawn(function()
                     cycleCounted = true
                 else
                     retries += 1
+
+                    if retryIndex >= 2 then
+                        cycleUsedSecondRetry = true
+                    end
                 end
 
                 remoteCalls += 1
 
-                local attemptStartedAt = os.clock()
-                local remote = getConsumeRemote()
+                local endpoint = getConsumeEndpoint()
 
-                if not remote then
-                    error("[Runtime] Consume remote became unavailable.")
+                if not endpoint then
+                    error("[Runtime] Consume endpoint became unavailable.")
                 end
 
-                local ok, response, didTimeout = invokeConsumeWithTimeout(remote, uid)
+                local ok, response, didTimeout = invokeConsumeWithTimeout(endpoint, uid)
                 heartbeat("remote invocation complete")
 
                 lastResponse = response
@@ -1466,10 +2503,28 @@ task.spawn(function()
                 else
                     errors += 1
                     consecutiveRemoteErrors += 1
-                    ConsumeRemote = nil
+                    local failedEndpointLabel = endpoint.label
+                    ConsumeEndpoint = nil
+                    lastResolvedEndpointLabel = nil
+                    dashboard.remote = "Re-resolving after error"
 
                     if errors == 1 or errors % 10 == 0 then
                         warn("[Runtime] Remote failed: " .. tostring(response))
+                    end
+
+                    if consecutiveRemoteErrors == 1 then
+                        sendWebhook({
+                            title = "Remote Route Invalidated",
+                            description = "A genuine communication error invalidated the cached endpoint. Automatic resolution will run before the next placement attempt. A normal server response of `false` does not trigger this process.",
+                            color = 16753920,
+                            targetZone = SETTINGS.TARGET_ZONE,
+                            fields = {
+                                webhookField("Failed Endpoint", failedEndpointLabel, false),
+                                webhookField("Error", tostring(response), false),
+                                webhookField("Resolver State", "Re-resolving", true),
+                                webhookField("Consecutive Remote Errors", consecutiveRemoteErrors, true),
+                            },
+                        })
                     end
 
                     if consecutiveRemoteErrors >= SETTINGS.REMOTE_ERROR_RESTART_AFTER then
@@ -1507,7 +2562,6 @@ task.spawn(function()
                     end
 
                     clearRejectionStreak()
-                    nextAttemptAt = attemptStartedAt + currentInterval
                     cycleFinished = true
                 elseif retryIndex < cycleRetryLimit then
                     local retryWait = retryIndex == 0
@@ -1530,7 +2584,6 @@ task.spawn(function()
                         end
 
                         clearRejectionStreak()
-                        nextAttemptAt = attemptStartedAt + currentInterval
                         cycleFinished = true
                     end
                 else
@@ -1554,17 +2607,17 @@ task.spawn(function()
                             })
                         end
 
+                        local circuitWasAlreadyActive = circuitBreakerActive
                         alertOnRejectionStreak()
+
+                        if circuitWasAlreadyActive then
+                            circuitBreakerDelay = math.min(
+                                SETTINGS.CIRCUIT_BREAKER_MAX_DELAY,
+                                circuitBreakerDelay * 2
+                            )
+                        end
                     end
 
-                    -- Backoff replaces the normal interval when it is larger;
-                    -- stacking both delays unnecessarily penalized transient
-                    -- failures that recovered on the following cycle.
-                    nextAttemptAt = attemptStartedAt
-                        + math.max(
-                            currentInterval,
-                            getRejectionBackoff(rejectedStreak)
-                        )
                     cycleFinished = true
                 end
 
@@ -1582,13 +2635,50 @@ task.spawn(function()
                     failedCycles += 1
                 end
 
+                dashboard.interval = currentInterval
+                dashboard.successRate = cycles > 0
+                    and confirmed / cycles * 100
+                    or 100
+
+                if circuitBreakerActive then
+                    dashboard.state = "Circuit"
+                end
+
                 heartbeat("adaptive update")
-                updateAdaptiveRate(cycleConfirmed, cycleHadServerReject)
+                recordCalibrationSample(
+                    cycleConfirmed,
+                    cycleHadServerReject,
+                    cycleUsedSecondRetry
+                )
+                updateAdaptiveRate(
+                    cycleConfirmed,
+                    cycleHadServerReject,
+                    cycleUsedSecondRetry
+                )
                 heartbeat("adaptive update complete")
 
-                -- Apply a controller change to the next scheduled attempt,
-                -- including a slowdown selected at the end of this cycle.
-                nextAttemptAt += currentInterval - intervalAtCycleStart
+                -- Always anchor the next primary placement to completion of
+                -- the current cycle. A successful retry therefore receives a
+                -- complete interval before another primary request begins.
+                local scheduleBase = os.clock()
+
+                if cycleConfirmed then
+                    local jitter = SETTINGS.PACING_JITTER_MAX > 0
+                        and math.random() * SETTINGS.PACING_JITTER_MAX
+                        or 0
+                    nextAttemptAt = scheduleBase + currentInterval + jitter
+                elseif circuitBreakerActive then
+                    nextAttemptAt = scheduleBase + circuitBreakerDelay
+                else
+                    -- Backoff replaces the normal interval when it is larger;
+                    -- stacking both delays would over-penalize a transient
+                    -- failure that may recover on the next cycle.
+                    nextAttemptAt = scheduleBase
+                        + math.max(
+                            currentInterval,
+                            getRejectionBackoff(rejectedStreak)
+                        )
+                end
 
                 printStatus()
             end
@@ -1621,6 +2711,12 @@ task.spawn(function()
         local finalPerDay = finalPerHour * 24
         local finalSuccessRate = cycles > 0 and confirmed / cycles * 100 or 0
         local finalRecoveryRate = cycles > 0 and recoveredCycles / cycles * 100 or 0
+        dashboard.state = "Stopped"
+        dashboard.interval = currentInterval
+        dashboard.hourly = finalPerHour
+        dashboard.daily = finalPerDay
+        dashboard.successRate = finalSuccessRate
+        dashboard.pinatas = lastKnownTotal
 
         sendWebhook({
             title = noItemsRemain and "Mini Pinata Inventory Exhausted" or "Mini Pinata Engine Stopped",
@@ -1746,6 +2842,8 @@ task.spawn(function()
             restartDelay = restartDelayBase
         end
 
+        dashboard.state = "Fault"
+
         sendWebhook({
             title = "Engine Fault - Restart Scheduled",
             description = "The supervisor detected a runtime fault. The failed engine thread was isolated and a clean restart has been scheduled.",
@@ -1772,6 +2870,8 @@ task.spawn(function()
             break
         end
 
+        dashboard.state = "Booting"
+
         if runDuration < 300 then
             restartDelay = math.min(restartDelay * 2, restartDelayMax)
         end
@@ -1779,6 +2879,7 @@ task.spawn(function()
 
     if cancellationFailed then
         warn("[Runtime] Safety guard retained until the next client relaunch.")
+        dashboard.state = "Stopped"
         sendWebhook({
             title = "Engine Safety Stop",
             description = "A stalled thread could not be cancelled safely. Automatic placement is disabled until Volt relaunches this Roblox client.",
