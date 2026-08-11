@@ -1,5 +1,77 @@
 local env = getgenv()
-local ENGINE_BUILD = "calibrated-autoremote-15"
+local ENGINE_BUILD = "calibrated-autoremote-15.1"
+
+-- One public entrypoint starts the read-only profit ledger for every account.
+-- It remains a separately supervised thread, so download, compile, or runtime
+-- failures in telemetry can never block the placement engine or GScript.
+local function startFleetLedger()
+    if env.GLEDGER_ENABLED == false
+        or env.__FLEET_PROFIT_LEDGER_RUNNING
+        or env.__FLEET_PROFIT_LEDGER_LOADING
+    then
+        return
+    end
+
+    env.__FLEET_PROFIT_LEDGER_LOADING = true
+
+    if env.GLEDGER_ROLE == nil then
+        env.GLEDGER_ROLE = env.GPINATA_ENABLED == false
+            and "GScript Account"
+            or "Pinata Farmer"
+    end
+
+    task.spawn(function()
+        local ledgerUrl = "https://raw.githubusercontent.com/"
+            .. "vaporcadillac/client-runtime-a91e6f4c/main/module_f0a9.lua"
+        local lastError = "download unavailable"
+
+        for attempt = 1, 5 do
+            if env.STOP_FLEET_PROFIT_LEDGER then
+                break
+            end
+
+            local requestUrl = ledgerUrl
+                .. "?session="
+                .. tostring(os.time())
+                .. "&attempt="
+                .. tostring(attempt)
+            local downloadOk, source = pcall(function()
+                return game:HttpGet(requestUrl)
+            end)
+
+            if downloadOk and type(source) == "string" and #source > 0 then
+                local chunk, compileError = loadstring(source)
+
+                if chunk then
+                    local runtimeOk, runtimeError = pcall(chunk)
+                    env.__FLEET_PROFIT_LEDGER_LOADING = false
+
+                    if not runtimeOk then
+                        warn(
+                            "[LedgerBootstrap] Startup failed: "
+                                .. tostring(runtimeError)
+                        )
+                    end
+
+                    return
+                end
+
+                lastError = tostring(compileError)
+            else
+                lastError = tostring(source)
+            end
+
+            if attempt < 5 then
+                task.wait(math.min(20, attempt * 3))
+            end
+        end
+
+        env.__FLEET_PROFIT_LEDGER_LOADING = false
+        warn("[LedgerBootstrap] Could not start ledger: " .. lastError)
+    end)
+end
+
+startFleetLedger()
 
 if env.GPINATA_ENABLED == false then
     return
