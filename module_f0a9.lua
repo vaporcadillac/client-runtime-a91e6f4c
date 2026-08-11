@@ -965,8 +965,18 @@ task.spawn(function()
             maximumPing = maximumPing and math.max(maximumPing, ping) or ping
         end
 
+        local liveWindowSeconds = math.max(1, os.clock() - reportStartedAt)
+        local liveWindowNetGain = currentGems - reportStartGems
+        local liveHourlyNetGain = liveWindowNetGain / liveWindowSeconds * 3600
+        local liveDailyNetGain = currentGems
+            - (tonumber(profile.dayStartGems) or currentGems)
+
         env.GLEDGER_LIVE_SNAPSHOT = {
             build = LEDGER_BUILD,
+            profitBasis = "direct_gems_only",
+            windowNetGain = liveWindowNetGain,
+            hourlyNetGain = liveHourlyNetGain,
+            dailyNetGain = liveDailyNetGain,
             account = LocalPlayer and LocalPlayer.Name or "Unknown",
             role = SETTINGS.ROLE,
             zone = SETTINGS.TARGET_ZONE,
