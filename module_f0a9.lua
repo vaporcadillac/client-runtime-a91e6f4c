@@ -970,6 +970,17 @@ task.spawn(function()
         local liveHourlyNetGain = liveWindowNetGain / liveWindowSeconds * 3600
         local liveDailyNetGain = currentGems
             - (tonumber(profile.dayStartGems) or currentGems)
+        local miniPinataKey = normalize("Mini Pinata")
+        local liveWindowPinatasConsumed = math.max(
+            0,
+            (tonumber(reportStartItems[miniPinataKey]) or 0)
+                - (tonumber(currentItems[miniPinataKey]) or 0)
+        )
+        local liveDailyPinatasConsumed = math.max(
+            0,
+            (tonumber(profile.dayStartItems[miniPinataKey]) or 0)
+                - (tonumber(currentItems[miniPinataKey]) or 0)
+        )
 
         env.GLEDGER_LIVE_SNAPSHOT = {
             build = LEDGER_BUILD,
@@ -977,6 +988,9 @@ task.spawn(function()
             windowNetGain = liveWindowNetGain,
             hourlyNetGain = liveHourlyNetGain,
             dailyNetGain = liveDailyNetGain,
+            windowSeconds = liveWindowSeconds,
+            windowPinatasConsumed = liveWindowPinatasConsumed,
+            dailyPinatasConsumed = liveDailyPinatasConsumed,
             account = LocalPlayer and LocalPlayer.Name or "Unknown",
             role = SETTINGS.ROLE,
             zone = SETTINGS.TARGET_ZONE,
