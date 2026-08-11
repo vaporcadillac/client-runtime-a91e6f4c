@@ -1817,6 +1817,21 @@ task.spawn(function()
         local lastResponse = nil
         local lastKnownTotal = initialTotal
         local noItemsRemain = false
+        -- Runtime-only telemetry configuration. Do not put endpoint keys in this file.
+        local telemetryRequest = resolveRequestFunction()
+        local telemetryEndpoint = type(env.GTELEMETRY_ENDPOINT) == "string"
+            and env.GTELEMETRY_ENDPOINT:match("^https://[^%s]+$")
+            or nil
+        local telemetryWriteKey = type(env.GTELEMETRY_WRITE_KEY) == "string"
+            and env.GTELEMETRY_WRITE_KEY
+            or nil
+        local telemetryInterval = math.max(
+            20,
+            math.min(30, numberSetting("GTELEMETRY_INTERVAL_SECONDS", 25))
+        )
+        local telemetryLastConfirmationAt = 0
+        local telemetryPublisherRunning = false
+
         local reportSnapshot = {
             cycles = 0,
             confirmed = 0,
@@ -2013,9 +2028,112 @@ task.spawn(function()
 
         end
 
+        local function telemetryStatus()
+            if dashboard.state == "Circuit" then
+                return "blocked"
+            end
+
+            if dashboard.state == "Fault" or dashboard.state == "Stopped" then
+                return "offline"
+            end
+
+            if dashboard.state == "Paused" or dashboard.state == "Booting" then
+                return "degraded"
+            end
+
+            return "healthy"
+        end
+
+        local function publishTelemetry()
+            if not telemetryRequest or not telemetryEndpoint or not telemetryWriteKey then
+                return
+            end
+
+            local elapsed = math.max(1, os.clock() - placementRunStartedAt)
+            local observedPerMinute = confirmed / elapsed * 60
+            local currentCircuitDowntime = circuitDowntimeTotal
+
+            if circuitBreakerActive and circuitStartedAt then
+                currentCircuitDowntime += math.max(0, os.clock() - circuitStartedAt)
+            end
+
+            local uptimePercent = math.max(
+                0,
+                math.min(100, (elapsed - currentCircuitDowntime) / elapsed * 100)
+            )
+            local supplyMinutes = observedPerMinute > 0
+                and lastKnownTotal / observedPerMinute
+                or 0
+            local payload = {
+                accountName = LocalPlayer and LocalPlayer.Name or "unknown",
+                robloxUserId = tostring(LocalPlayer and LocalPlayer.UserId or 0),
+                status = telemetryStatus(),
+                placementRatePerMinute = observedPerMinute,
+                confirmed = confirmed,
+                attempted = cycles,
+                adaptiveIntervalSeconds = currentInterval,
+                pinatasRemaining = lastKnownTotal,
+                supplyDurationMinutes = supplyMinutes,
+                pinatasConsumed = math.max(0, initialTotal - lastKnownTotal),
+                runtimeSeconds = elapsed,
+                lastConfirmationAt = telemetryLastConfirmationAt,
+                uptimePercent = uptimePercent,
+                windowNetGain = 0,
+                hourlyNetGain = 0,
+                dailyNetGain = 0,
+            }
+
+            local encodedOk, body = pcall(HttpService.JSONEncode, HttpService, payload)
+
+            if not encodedOk then
+                return
+            end
+
+            pcall(telemetryRequest, {
+                Url = telemetryEndpoint,
+                Method = "POST",
+                Headers = {
+                    ["Authorization"] = "Bearer " .. telemetryWriteKey,
+                    ["Content-Type"] = "application/json",
+                },
+                Body = body,
+            })
+        end
+
+        local function startTelemetryPublisher()
+            if telemetryPublisherRunning
+                or not telemetryRequest
+                or not telemetryEndpoint
+                or not telemetryWriteKey
+            then
+                return
+            end
+
+            telemetryPublisherRunning = true
+
+            task.spawn(function()
+                while not env.STOP_MINI_PINATA_FAST_PLACER do
+                    publishTelemetry()
+
+                    local deadline = os.clock() + telemetryInterval
+
+                    while not env.STOP_MINI_PINATA_FAST_PLACER
+                        and os.clock() < deadline
+                    do
+                        task.wait(math.min(1, deadline - os.clock()))
+                    end
+                end
+
+                telemetryPublisherRunning = false
+            end)
+        end
+
+        startTelemetryPublisher()
+
         local function recordConfirmation(amountUsed, totalAfter)
             local firstConfirmation = confirmed == 0
             confirmed += amountUsed
+            telemetryLastConfirmationAt = math.floor(os.time() * 1000)
             lastKnownTotal = totalAfter or math.max(0, lastKnownTotal - amountUsed)
             dashboard.pinatas = lastKnownTotal
             local elapsed = math.max(1, os.clock() - placementRunStartedAt)
