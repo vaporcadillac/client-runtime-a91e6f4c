@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "calibrated-autoremote-14"
+local ENGINE_BUILD = "calibrated-autoremote-15"
 
 if env.GPINATA_ENABLED == false then
     return
@@ -231,10 +231,9 @@ task.spawn(function()
         local daily = tonumber(dashboard.daily) or 0
         local lines = {
             string.format(
-                "%s **%s**  •  Area `%s`  •  Interval `%.2fs`",
+                "%s **%s**  •  Interval `%.2fs`",
                 stateIcon,
                 state,
-                tostring(targetZone or env.GZONE_TO or "?"),
                 tonumber(dashboard.interval) or 0
             ),
             string.format(
@@ -514,12 +513,8 @@ task.spawn(function()
                 math.floor(numberSetting("GPINATA_ADAPTIVE_WINDOW", 20))
             ),
             ADAPTIVE_LONG_WINDOW = math.max(
-                50,
-                math.floor(numberSetting("GPINATA_ADAPTIVE_LONG_WINDOW", 150))
-            ),
-            ADAPTIVE_STEP_UP = math.max(
-                0.01,
-                numberSetting("GPINATA_ADAPTIVE_STEP_UP", 0.15)
+                300,
+                math.floor(numberSetting("GPINATA_ADAPTIVE_LONG_WINDOW", 300))
             ),
             ADAPTIVE_STEP_DOWN = math.max(
                 0.01,
@@ -538,16 +533,19 @@ task.spawn(function()
                 numberSetting("GPINATA_ADAPTIVE_PRESSURE_STEP", 0.10)
             ),
             ADAPTIVE_RECOVERY_HOLD = math.max(
-                60,
-                numberSetting("GPINATA_ADAPTIVE_RECOVERY_HOLD", 1800)
+                2700,
+                numberSetting("GPINATA_ADAPTIVE_RECOVERY_HOLD", 2700)
             ),
             ADAPTIVE_FAILURE_HOLD = math.max(
-                60,
-                numberSetting("GPINATA_ADAPTIVE_FAILURE_HOLD", 1800)
+                3600,
+                numberSetting("GPINATA_ADAPTIVE_FAILURE_HOLD", 3600)
             ),
-            ADAPTIVE_RECOVERY_MAX_REJECT_RATE = math.max(
-                0,
-                numberSetting("GPINATA_ADAPTIVE_RECOVERY_MAX_REJECT_RATE", 0.03)
+            ADAPTIVE_RECOVERY_MAX_REJECT_RATE = math.min(
+                0.015,
+                math.max(
+                    0,
+                    numberSetting("GPINATA_ADAPTIVE_RECOVERY_MAX_REJECT_RATE", 0.015)
+                )
             ),
             ADAPTIVE_RECOVERY_MAX_SECOND_RETRIES = math.max(
                 0,
@@ -555,6 +553,24 @@ task.spawn(function()
                     "GPINATA_ADAPTIVE_RECOVERY_MAX_SECOND_RETRIES",
                     0
                 ))
+            ),
+            ISOLATED_FAILURE_WINDOW = math.max(
+                50,
+                math.floor(numberSetting(
+                    "GPINATA_ISOLATED_FAILURE_WINDOW",
+                    100
+                ))
+            ),
+            ISOLATED_FAILURES_TO_SLOW = math.max(
+                2,
+                math.floor(numberSetting(
+                    "GPINATA_ISOLATED_FAILURES_TO_SLOW",
+                    2
+                ))
+            ),
+            ISOLATED_FAILURE_STEP = math.max(
+                0.05,
+                numberSetting("GPINATA_ISOLATED_FAILURE_STEP", 0.10)
             ),
             CONFIRM_WAIT = math.max(0.25, numberSetting("GPINATA_CONFIRM_WAIT", 1.5)),
             RETRY_DELAY = math.max(0.25, numberSetting("GPINATA_RETRY_DELAY", 1)),
@@ -610,6 +626,21 @@ task.spawn(function()
                 30,
                 numberSetting("GPINATA_CIRCUIT_BREAKER_MAX_DELAY", 300)
             ),
+            ZONE_CIRCUIT_WINDOW_SECONDS = math.max(
+                1800,
+                numberSetting("GPINATA_ZONE_CIRCUIT_WINDOW_SECONDS", 7200)
+            ),
+            ZONE_CIRCUITS_TO_UNHEALTHY = math.max(
+                2,
+                math.floor(numberSetting(
+                    "GPINATA_ZONE_CIRCUITS_TO_UNHEALTHY",
+                    2
+                ))
+            ),
+            ZONE_UNHEALTHY_HOLD = math.max(
+                1800,
+                numberSetting("GPINATA_ZONE_UNHEALTHY_HOLD", 3600)
+            ),
             PACING_JITTER_MAX = math.max(
                 0,
                 math.min(1, numberSetting("GPINATA_PACING_JITTER_MAX", 0.15))
@@ -617,16 +648,19 @@ task.spawn(function()
             CALIBRATION = env.GPINATA_CALIBRATION ~= false,
             CALIBRATION_PERSIST = env.GPINATA_CALIBRATION_PERSIST ~= false,
             CALIBRATION_MIN_CYCLES = math.max(
-                100,
-                math.floor(numberSetting("GPINATA_CALIBRATION_MIN_CYCLES", 250))
+                300,
+                math.floor(numberSetting("GPINATA_CALIBRATION_MIN_CYCLES", 300))
             ),
             CALIBRATION_MIN_SECONDS = math.max(
-                600,
-                numberSetting("GPINATA_CALIBRATION_MIN_SECONDS", 1800)
+                2700,
+                numberSetting("GPINATA_CALIBRATION_MIN_SECONDS", 2700)
             ),
-            CALIBRATION_MAX_REJECT_RATE = math.max(
-                0,
-                numberSetting("GPINATA_CALIBRATION_MAX_REJECT_RATE", 0.03)
+            CALIBRATION_MAX_REJECT_RATE = math.min(
+                0.015,
+                math.max(
+                    0,
+                    numberSetting("GPINATA_CALIBRATION_MAX_REJECT_RATE", 0.015)
+                )
             ),
             AUTO_REMOTE = env.GPINATA_AUTO_REMOTE ~= false,
             AUTO_REMOTE_RESOLVE_TIMEOUT = math.max(
@@ -708,7 +742,7 @@ task.spawn(function()
             tostring(SETTINGS.TARGET_ZONE)
         )
         local calibrationProfile = {
-            schema = 1,
+            schema = 2,
             userId = LocalPlayer and LocalPlayer.UserId or 0,
             placeId = game.PlaceId,
             placeVersion = game.PlaceVersion,
@@ -718,6 +752,11 @@ task.spawn(function()
             qualifiedSeconds = 0,
             sessions = 1,
             updatedAt = 0,
+            nextRecoveryAllowedAt = 0,
+            recentCircuitCount = 0,
+            lastCircuitAt = 0,
+            zoneUnhealthyUntil = 0,
+            engineBuild = ENGINE_BUILD,
         }
         local calibrationPersistent = SETTINGS.CALIBRATION
             and SETTINGS.CALIBRATION_PERSIST
@@ -754,6 +793,7 @@ task.spawn(function()
             local profileMatches = tonumber(decoded.userId) == calibrationProfile.userId
                 and tonumber(decoded.placeId) == calibrationProfile.placeId
                 and tonumber(decoded.zone) == calibrationProfile.zone
+            local versionMatches = tonumber(decoded.placeVersion) == game.PlaceVersion
 
             if not recommended or not profileMatches then
                 dashboard.calibration = "New local profile"
@@ -761,8 +801,7 @@ task.spawn(function()
             end
 
             calibrationProfile = decoded
-            calibrationProfile.schema = 1
-            calibrationProfile.placeVersion = game.PlaceVersion
+            calibrationProfile.schema = 2
             calibrationProfile.recommendedInterval = math.max(
                 SETTINGS.ADAPTIVE_MIN_INTERVAL,
                 math.min(SETTINGS.ADAPTIVE_MAX_INTERVAL, recommended)
@@ -771,14 +810,41 @@ task.spawn(function()
                 0,
                 tonumber(calibrationProfile.sessions) or 0
             ) + 1
+            calibrationProfile.nextRecoveryAllowedAt = math.max(
+                0,
+                tonumber(calibrationProfile.nextRecoveryAllowedAt) or 0
+            )
+            calibrationProfile.recentCircuitCount = math.max(
+                0,
+                math.floor(tonumber(calibrationProfile.recentCircuitCount) or 0)
+            )
+            calibrationProfile.lastCircuitAt = math.max(
+                0,
+                tonumber(calibrationProfile.lastCircuitAt) or 0
+            )
+            calibrationProfile.zoneUnhealthyUntil = math.max(
+                0,
+                tonumber(calibrationProfile.zoneUnhealthyUntil) or 0
+            )
+
+            if not versionMatches then
+                calibrationProfile.provisional = true
+                calibrationProfile.provisionalReason = "game build changed"
+                calibrationProfile.qualifiedCycles = 0
+                calibrationProfile.qualifiedSeconds = 0
+                calibrationProfile.rejectRate = nil
+            end
+
             currentInterval = math.max(
                 currentInterval,
                 calibrationProfile.recommendedInterval
             )
             dashboard.calibration = string.format(
-                calibrationProfile.provisional
-                    and "Remembered protective %.2fs"
-                    or "Remembered %.2fs",
+                not versionMatches
+                    and "Game update • validating %.2fs"
+                    or calibrationProfile.provisional
+                        and "Remembered protective %.2fs"
+                        or "Remembered %.2fs",
                 calibrationProfile.recommendedInterval
             )
         end
@@ -788,8 +854,10 @@ task.spawn(function()
                 return false
             end
 
+            calibrationProfile.schema = 2
             calibrationProfile.placeVersion = game.PlaceVersion
             calibrationProfile.updatedAt = os.time()
+            calibrationProfile.engineBuild = ENGINE_BUILD
             local encodeOk, encoded = pcall(
                 HttpService.JSONEncode,
                 HttpService,
@@ -808,7 +876,73 @@ task.spawn(function()
             return writeOk
         end
 
+        local function persistRecoveryLock(seconds, reason)
+            local lockUntil = os.time() + math.ceil(math.max(0, seconds or 0))
+            calibrationProfile.nextRecoveryAllowedAt = math.max(
+                tonumber(calibrationProfile.nextRecoveryAllowedAt) or 0,
+                lockUntil
+            )
+            calibrationProfile.lastPressureReason = tostring(reason or "pressure")
+            return saveCalibrationProfile()
+        end
+
+        local function recordZoneCircuit()
+            local nowEpoch = os.time()
+            local previousCircuitAt = tonumber(calibrationProfile.lastCircuitAt) or 0
+
+            if previousCircuitAt <= 0
+                or nowEpoch - previousCircuitAt
+                    > SETTINGS.ZONE_CIRCUIT_WINDOW_SECONDS
+            then
+                calibrationProfile.recentCircuitCount = 1
+            else
+                calibrationProfile.recentCircuitCount = math.max(
+                    0,
+                    math.floor(
+                        tonumber(calibrationProfile.recentCircuitCount) or 0
+                    )
+                ) + 1
+            end
+
+            calibrationProfile.lastCircuitAt = nowEpoch
+            local markedUnhealthy = calibrationProfile.recentCircuitCount
+                >= SETTINGS.ZONE_CIRCUITS_TO_UNHEALTHY
+
+            if markedUnhealthy then
+                calibrationProfile.zoneUnhealthyUntil = math.max(
+                    tonumber(calibrationProfile.zoneUnhealthyUntil) or 0,
+                    nowEpoch + SETTINGS.ZONE_UNHEALTHY_HOLD
+                )
+                calibrationProfile.nextRecoveryAllowedAt = math.max(
+                    tonumber(calibrationProfile.nextRecoveryAllowedAt) or 0,
+                    calibrationProfile.zoneUnhealthyUntil
+                )
+                calibrationProfile.lastPressureReason = "repeated zone circuits"
+            end
+
+            saveCalibrationProfile()
+            return markedUnhealthy, calibrationProfile.recentCircuitCount
+        end
+
+        local function zoneHealthRemaining()
+            return math.max(
+                0,
+                (tonumber(calibrationProfile.zoneUnhealthyUntil) or 0) - os.time()
+            )
+        end
+
         loadCalibrationProfile()
+
+        if os.time() - (tonumber(calibrationProfile.lastCircuitAt) or 0)
+            > SETTINGS.ZONE_CIRCUIT_WINDOW_SECONDS
+        then
+            calibrationProfile.recentCircuitCount = 0
+        end
+
+        if (tonumber(calibrationProfile.zoneUnhealthyUntil) or 0) <= os.time() then
+            calibrationProfile.zoneUnhealthyUntil = 0
+        end
+
         dashboard.interval = currentInterval
         dashboard.hourly = 3600 / currentInterval
         dashboard.daily = 86400 / currentInterval
@@ -1586,6 +1720,7 @@ task.spawn(function()
 
         local placementRunStartedAt = os.clock()
         local lastWebhookStatusAt = placementRunStartedAt
+        local lastReportAt = placementRunStartedAt
         local cycles = 0
         local confirmed = 0
         local remoteCalls = 0
@@ -1600,6 +1735,8 @@ task.spawn(function()
         local circuitBreakerActive = false
         local circuitBreakerDelay = SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY
         local circuitBreakerTrips = 0
+        local circuitStartedAt = nil
+        local circuitDowntimeTotal = 0
         local failedCycles = 0
         local errors = 0
         local timeouts = 0
@@ -1608,6 +1745,19 @@ task.spawn(function()
         local lastResponse = nil
         local lastKnownTotal = initialTotal
         local noItemsRemain = false
+        local reportSnapshot = {
+            cycles = 0,
+            confirmed = 0,
+            calls = 0,
+            recovered = 0,
+            rejected = 0,
+            failed = 0,
+            errors = 0,
+            timeouts = 0,
+            gems = tonumber(dashboard.gems),
+            pinatas = initialTotal,
+            circuitDowntime = 0,
+        }
 
         local calibrationSegmentStartedAt = os.clock()
         local calibrationSegmentInterval = currentInterval
@@ -1618,6 +1768,7 @@ task.spawn(function()
         local calibrationSegmentContaminated = false
         local calibrationSegmentQualified = false
         local calibrationBlockedUntil = 0
+        local calibrationQualifiedLabel = nil
 
         local function resetCalibrationSegment(reason)
             calibrationSegmentStartedAt = os.clock()
@@ -1629,6 +1780,7 @@ task.spawn(function()
             calibrationSegmentContaminated = false
             calibrationSegmentQualified = false
             calibrationBlockedUntil = 0
+            calibrationQualifiedLabel = nil
 
             if SETTINGS.CALIBRATION then
                 dashboard.calibration = string.format(
@@ -1662,6 +1814,36 @@ task.spawn(function()
                 return
             end
 
+            local unhealthyRemaining = zoneHealthRemaining()
+
+            if unhealthyRemaining > 0 then
+                calibrationSegmentContaminated = true
+                calibrationBlockedUntil = math.max(
+                    calibrationBlockedUntil,
+                    os.clock() + unhealthyRemaining
+                )
+                dashboard.calibration = "Zone recovery lock • "
+                    .. formatDuration(unhealthyRemaining)
+                return
+            end
+
+            local recoveryLockRemaining = math.max(
+                0,
+                (tonumber(calibrationProfile.nextRecoveryAllowedAt) or 0)
+                    - os.time()
+            )
+
+            if recoveryLockRemaining > 0 then
+                calibrationSegmentContaminated = true
+                calibrationBlockedUntil = math.max(
+                    calibrationBlockedUntil,
+                    os.clock() + recoveryLockRemaining
+                )
+                dashboard.calibration = "Recovery evidence lock • "
+                    .. formatDuration(recoveryLockRemaining)
+                return
+            end
+
             if calibrationSegmentContaminated
                 and os.clock() >= calibrationBlockedUntil
                 and cycleConfirmed
@@ -1671,6 +1853,16 @@ task.spawn(function()
 
             if math.abs(calibrationSegmentInterval - currentInterval) >= 0.001 then
                 resetCalibrationSegment("interval changed")
+            end
+
+            if calibrationSegmentQualified then
+                dashboard.calibration = calibrationQualifiedLabel
+                    or string.format(
+                        "Qualified %.2fs • %d clean",
+                        currentInterval,
+                        calibrationSegmentCycles
+                    )
+                return
             end
 
             calibrationSegmentCycles += 1
@@ -1729,13 +1921,22 @@ task.spawn(function()
             calibrationProfile.failedCycles = calibrationSegmentFailed
             calibrationProfile.secondRetries = calibrationSegmentSecondRetries
             calibrationProfile.provisional = false
+            calibrationProfile.provisionalReason = nil
+
+            if (tonumber(calibrationProfile.nextRecoveryAllowedAt) or 0)
+                <= os.time()
+            then
+                calibrationProfile.nextRecoveryAllowedAt = 0
+            end
+
             local saved = saveCalibrationProfile()
-            dashboard.calibration = string.format(
+            calibrationQualifiedLabel = string.format(
                 "%s %.2fs • %d clean",
                 saved and "Remembered" or "Qualified",
                 currentInterval,
                 calibrationSegmentCycles
             )
+            dashboard.calibration = calibrationQualifiedLabel
             dashboard.state = "Running"
 
         end
@@ -1822,6 +2023,63 @@ task.spawn(function()
 
             if shouldWebhook then
                 lastWebhookStatusAt = now
+                local currentCircuitDowntime = circuitDowntimeTotal
+
+                if circuitBreakerActive and circuitStartedAt then
+                    currentCircuitDowntime += now - circuitStartedAt
+                end
+
+                local windowElapsed = math.max(1, now - lastReportAt)
+                local windowCycles = math.max(0, cycles - reportSnapshot.cycles)
+                local windowConfirmed = math.max(
+                    0,
+                    confirmed - reportSnapshot.confirmed
+                )
+                local windowCalls = math.max(0, remoteCalls - reportSnapshot.calls)
+                local windowRecovered = math.max(
+                    0,
+                    recoveredCycles - reportSnapshot.recovered
+                )
+                local windowRejected = math.max(
+                    0,
+                    rejected - reportSnapshot.rejected
+                )
+                local windowFailed = math.max(
+                    0,
+                    failedCycles - reportSnapshot.failed
+                )
+                local windowErrors = math.max(0, errors - reportSnapshot.errors)
+                local windowTimeouts = math.max(
+                    0,
+                    timeouts - reportSnapshot.timeouts
+                )
+                local windowCircuitDowntime = math.max(
+                    0,
+                    currentCircuitDowntime - reportSnapshot.circuitDowntime
+                )
+                local windowSuccessRate = windowCycles > 0
+                    and windowConfirmed / windowCycles * 100
+                    or 0
+                local windowCallEfficiency = windowCalls > 0
+                    and windowConfirmed / windowCalls * 100
+                    or 0
+                local windowPerHour = windowConfirmed / windowElapsed * 3600
+                local windowGemDelta = dashboard.gems ~= nil
+                    and reportSnapshot.gems ~= nil
+                    and dashboard.gems - reportSnapshot.gems
+                    or nil
+                local windowGemText = windowGemDelta == nil
+                    and "Updating…"
+                    or string.format(
+                        "%s%s (`%s`)",
+                        windowGemDelta >= 0 and "+" or "",
+                        formatCompact(windowGemDelta),
+                        formatInteger(windowGemDelta)
+                    )
+                local windowPinatasUsed = math.max(
+                    0,
+                    (reportSnapshot.pinatas or lastKnownTotal) - lastKnownTotal
+                )
                 local initialAccepted = math.max(
                     0,
                     cycles - recoveredCycles - failedCycles
@@ -1832,11 +2090,35 @@ task.spawn(function()
                 sendWebhook({
                     title = "35-Minute Placement Update",
                     description = "Scheduled health report. The dashboard reflects live gems, remaining piñatas, interval and observed placement speed.",
-                    color = failedCycles == 0 and recoveryRate < 5
+                    color = windowFailed == 0
+                        and (
+                            windowCycles == 0
+                                or windowRecovered / windowCycles * 100 < 5
+                        )
                         and 3447003
                         or 16753920,
                     targetZone = SETTINGS.TARGET_ZONE,
                     fields = {
+                        webhookField(
+                            "📊 Last 35 Minutes",
+                            string.format(
+                                "**%s/%s confirmed** — %.2f%%\n**%.1f/hour observed** • Calls: %s • Efficiency: %.2f%%\nGems: **%s** • Piñatas used: **%s**\nRecovered: %s • Rejections: %s • Failed: %s\nWindow: %s • Circuit downtime: %s",
+                                formatInteger(windowConfirmed),
+                                formatInteger(windowCycles),
+                                windowSuccessRate,
+                                windowPerHour,
+                                formatInteger(windowCalls),
+                                windowCallEfficiency,
+                                windowGemText,
+                                formatInteger(windowPinatasUsed),
+                                formatInteger(windowRecovered),
+                                formatInteger(windowRejected),
+                                formatInteger(windowFailed),
+                                formatDuration(windowElapsed),
+                                formatDuration(windowCircuitDowntime)
+                            ),
+                            false
+                        ),
                         webhookField(
                             "⚡ Placement Performance",
                             string.format(
@@ -1889,11 +2171,13 @@ task.spawn(function()
                         webhookField(
                             "📡 Communication Health",
                             string.format(
-                                "%s\nCalls: %s • Errors: %s • Timeouts: %s\nLast response: `%s`",
+                                "%s\nCalls: %s • Errors: %s • Timeouts: %s\nWindow errors: %s • Window timeouts: %s\nLast response: `%s`",
                                 tostring(dashboard.remote),
                                 formatInteger(remoteCalls),
                                 formatInteger(errors),
                                 formatInteger(timeouts),
+                                formatInteger(windowErrors),
+                                formatInteger(windowTimeouts),
                                 tostring(lastResponse)
                             ),
                             false
@@ -1909,6 +2193,19 @@ task.spawn(function()
                         ),
                     },
                 })
+
+                lastReportAt = now
+                reportSnapshot.cycles = cycles
+                reportSnapshot.confirmed = confirmed
+                reportSnapshot.calls = remoteCalls
+                reportSnapshot.recovered = recoveredCycles
+                reportSnapshot.rejected = rejected
+                reportSnapshot.failed = failedCycles
+                reportSnapshot.errors = errors
+                reportSnapshot.timeouts = timeouts
+                reportSnapshot.gems = tonumber(dashboard.gems)
+                reportSnapshot.pinatas = lastKnownTotal
+                reportSnapshot.circuitDowntime = currentCircuitDowntime
             end
         end
 
@@ -1926,78 +2223,326 @@ task.spawn(function()
 
         local adaptiveWindowCycles = 0
         local adaptiveWindowRejected = 0
-        local adaptiveWindowFailed = 0
         local adaptivePressureWindows = 0
-        local adaptiveHistory = {}
+        local adaptiveHistory = table.create(SETTINGS.ADAPTIVE_LONG_WINDOW)
+        local adaptiveHistoryCount = 0
+        local adaptiveHistoryNext = 1
         local adaptiveHistoryRejected = 0
         local adaptiveHistoryFailed = 0
         local adaptiveHistorySecondRetries = 0
+        local adaptiveValidCycleIndex = 0
+        local isolatedFailureMarks = {}
+        local persistedRecoveryRemaining = math.max(
+            0,
+            (tonumber(calibrationProfile.nextRecoveryAllowedAt) or 0) - os.time()
+        )
         local adaptiveRecoveryNotBefore = os.clock()
+            + math.max(persistedRecoveryRemaining, zoneHealthRemaining())
+
+        if zoneHealthRemaining() > 0 then
+            dashboard.calibration = "Zone recovery lock • "
+                .. formatDuration(zoneHealthRemaining())
+        end
+
+        local function resetAdaptiveWindow()
+            adaptiveWindowCycles = 0
+            adaptiveWindowRejected = 0
+        end
 
         local function clearAdaptiveHistory()
-            adaptiveHistory = {}
+            table.clear(adaptiveHistory)
+            adaptiveHistoryCount = 0
+            adaptiveHistoryNext = 1
             adaptiveHistoryRejected = 0
             adaptiveHistoryFailed = 0
             adaptiveHistorySecondRetries = 0
         end
 
         local function pushAdaptiveHistory(cycleConfirmed, cycleRejected, usedSecondRetry)
-            local sample = {
-                rejected = cycleRejected == true,
-                failed = cycleConfirmed ~= true,
-                secondRetry = usedSecondRetry == true,
-            }
+            -- Store a compact numeric bit mask instead of allocating one table
+            -- per cycle: rejected=1, failed=2, second retry=4.
+            local sample = (cycleRejected == true and 1 or 0)
+                + (cycleConfirmed ~= true and 2 or 0)
+                + (usedSecondRetry == true and 4 or 0)
 
-            table.insert(adaptiveHistory, sample)
+            if adaptiveHistoryCount >= SETTINGS.ADAPTIVE_LONG_WINDOW then
+                local removed = adaptiveHistory[adaptiveHistoryNext]
 
-            if sample.rejected then
+                if removed then
+                    if removed % 2 == 1 then
+                        adaptiveHistoryRejected -= 1
+                    end
+
+                    if math.floor(removed / 2) % 2 == 1 then
+                        adaptiveHistoryFailed -= 1
+                    end
+
+                    if removed >= 4 then
+                        adaptiveHistorySecondRetries -= 1
+                    end
+                end
+            else
+                adaptiveHistoryCount += 1
+            end
+
+            adaptiveHistory[adaptiveHistoryNext] = sample
+            adaptiveHistoryNext = adaptiveHistoryNext
+                % SETTINGS.ADAPTIVE_LONG_WINDOW + 1
+
+            if cycleRejected then
                 adaptiveHistoryRejected += 1
             end
 
-            if sample.failed then
+            if not cycleConfirmed then
                 adaptiveHistoryFailed += 1
             end
 
-            if sample.secondRetry then
+            if usedSecondRetry then
                 adaptiveHistorySecondRetries += 1
             end
 
-            while #adaptiveHistory > SETTINGS.ADAPTIVE_LONG_WINDOW do
-                local removed = table.remove(adaptiveHistory, 1)
+        end
 
-                if removed.rejected then
-                    adaptiveHistoryRejected -= 1
-                end
+        local function pruneIsolatedFailures()
+            local oldestAllowed = adaptiveValidCycleIndex
+                - SETTINGS.ISOLATED_FAILURE_WINDOW
 
-                if removed.failed then
-                    adaptiveHistoryFailed -= 1
-                end
-
-                if removed.secondRetry then
-                    adaptiveHistorySecondRetries -= 1
-                end
+            while #isolatedFailureMarks > 0
+                and isolatedFailureMarks[1] <= oldestAllowed
+            do
+                table.remove(isolatedFailureMarks, 1)
             end
         end
 
-        local function updateAdaptiveRate(cycleConfirmed, cycleRejected, usedSecondRetry)
+        local function applyAdaptiveIntervalChange(
+            requestedInterval,
+            adjustmentReason,
+            evidence,
+            holdSeconds
+        )
+            local previousInterval = currentInterval
+            currentInterval = math.max(
+                SETTINGS.ADAPTIVE_MIN_INTERVAL,
+                math.min(
+                    SETTINGS.ADAPTIVE_MAX_INTERVAL,
+                    math.floor(requestedInterval * 100 + 0.5) / 100
+                )
+            )
+
+            if math.abs(currentInterval - previousInterval) < 0.001 then
+                return false
+            end
+
+            evidence = evidence or {}
+            holdSeconds = math.max(
+                tonumber(holdSeconds) or SETTINGS.ADAPTIVE_RECOVERY_HOLD,
+                SETTINGS.ADAPTIVE_RECOVERY_HOLD
+            )
+            local now = os.clock()
+            local slowedDown = currentInterval > previousInterval
+            dashboard.interval = currentInterval
+            resetCalibrationSegment("adaptive interval adjustment")
+            print(string.format(
+                "[Runtime] Adaptive | %.2fs -> %.2fs | %s | rejected %d/%d | failed %d",
+                previousInterval,
+                currentInterval,
+                adjustmentReason or "evidence update",
+                tonumber(evidence.windowRejected) or 0,
+                tonumber(evidence.windowCycles) or 0,
+                tonumber(evidence.windowFailed) or 0
+            ))
+
+            local protectiveProfileSaved = false
+
+            if slowedDown
+                and SETTINGS.CALIBRATION
+                and currentInterval > (
+                    tonumber(calibrationProfile.recommendedInterval)
+                        or SETTINGS.ADAPTIVE_MIN_INTERVAL
+                )
+            then
+                calibrationProfile.recommendedInterval = currentInterval
+                calibrationProfile.provisional = true
+                calibrationProfile.provisionalReason = adjustmentReason
+                calibrationProfile.qualifiedCycles = 0
+                calibrationProfile.qualifiedSeconds = 0
+                protectiveProfileSaved = saveCalibrationProfile()
+                dashboard.calibration = string.format(
+                    "%s protective %.2fs",
+                    protectiveProfileSaved and "Remembered" or "Session",
+                    currentInterval
+                )
+            end
+
+            adaptiveRecoveryNotBefore = math.max(
+                adaptiveRecoveryNotBefore,
+                now + holdSeconds
+            )
+            persistRecoveryLock(holdSeconds, adjustmentReason)
+
+            local historyCycles = tonumber(evidence.historyCycles)
+                or adaptiveHistoryCount
+            local historyRejectRate = tonumber(evidence.historyRejectRate)
+                or (
+                    historyCycles > 0
+                        and adaptiveHistoryRejected / historyCycles
+                        or 0
+                )
+            local cumulativeSuccessRate = cycles > 0
+                and confirmed / cycles * 100
+                or 0
+
+            sendWebhook({
+                title = slowedDown
+                    and "Adaptive Rate Slowed"
+                    or "Adaptive Rate Recovered",
+                description = slowedDown
+                    and "The consistency controller found repeated pacing evidence and made one protective interval change. Quarantined zone failures cannot directly force a speed change."
+                    or string.format(
+                        "%d clean evidence cycles plus the recovery lock allowed one cautious step toward the %.2f-second target.",
+                        SETTINGS.ADAPTIVE_LONG_WINDOW,
+                        SETTINGS.ADAPTIVE_MIN_INTERVAL
+                    ),
+                color = slowedDown and 16753920 or 5763719,
+                targetZone = SETTINGS.TARGET_ZONE,
+                fields = {
+                    webhookField("Adjustment Reason", adjustmentReason or "Evidence update", false),
+                    webhookField("Previous Interval", string.format("%.2f seconds", previousInterval), true),
+                    webhookField("New Interval", string.format("%.2f seconds", currentInterval), true),
+                    webhookField("Change", string.format("%+.2f seconds", currentInterval - previousInterval), true),
+                    webhookField(
+                        "Short Evidence",
+                        string.format(
+                            "%d cycles • %d rejected • %d quarantined failures",
+                            tonumber(evidence.windowCycles) or 0,
+                            tonumber(evidence.windowRejected) or 0,
+                            tonumber(evidence.isolatedFailures) or 0
+                        ),
+                        false
+                    ),
+                    webhookField(
+                        "Long Recovery Evidence",
+                        string.format(
+                            "%d/%d cycles • %.2f%% rejected • %d second retries",
+                            historyCycles,
+                            SETTINGS.ADAPTIVE_LONG_WINDOW,
+                            historyRejectRate * 100,
+                            adaptiveHistorySecondRetries
+                        ),
+                        false
+                    ),
+                    webhookField("Next Recovery Lock", formatDuration(holdSeconds), true),
+                    webhookField(
+                        "Zone Health",
+                        zoneHealthRemaining() > 0
+                            and ("Recovery locked for " .. formatDuration(zoneHealthRemaining()))
+                            or "Healthy",
+                        true
+                    ),
+                    webhookField(
+                        "Calibration Memory",
+                        slowedDown
+                            and (
+                                protectiveProfileSaved
+                                    and "Protective interval saved for the next relaunch"
+                                    or "Protective interval and recovery lock active"
+                            )
+                            or "Faster interval must complete full calibration before being remembered",
+                        false
+                    ),
+                    webhookField("Cumulative Confirmed", string.format("%s/%s", formatInteger(confirmed), formatInteger(cycles)), true),
+                    webhookField("Cumulative Success", string.format("%.2f%%", cumulativeSuccessRate), true),
+                    webhookField("Observed Pace", string.format("%.1f/hour | %.0f/day", dashboard.hourly or 0, dashboard.daily or 0), true),
+                    webhookField("Clean-Path Ceiling", string.format("%.1f/min | %.0f/day", 60 / currentInterval, 86400 / currentInterval), true),
+                    webhookField("Allowed Range", string.format("%.2f-%.2f seconds", SETTINGS.ADAPTIVE_MIN_INTERVAL, SETTINGS.ADAPTIVE_MAX_INTERVAL), true),
+                },
+            })
+
+            clearAdaptiveHistory()
+            resetAdaptiveWindow()
+            isolatedFailureMarks = {}
+            return true
+        end
+
+        local function updateAdaptiveRate(
+            cycleConfirmed,
+            cycleRejected,
+            usedSecondRetry,
+            recoveredFailureStreak,
+            recoveredFromCircuit
+        )
             if not SETTINGS.ADAPTIVE then
                 return
             end
 
-            -- Consecutive complete failures are handled by the circuit
-            -- breaker. They are more consistent with an occupied/stuck area
-            -- than a sustainable-rate problem, so do not let them teach the
-            -- normal interval controller the wrong lesson.
-            if circuitBreakerActive then
-                adaptiveWindowCycles = 0
-                adaptiveWindowRejected = 0
-                adaptiveWindowFailed = 0
+            local now = os.clock()
+
+            -- A complete failure is quarantined until the following accepted
+            -- probe tells us whether it was isolated or part of a zone burst.
+            -- It still invalidates all speed-recovery evidence immediately.
+            if not cycleConfirmed then
                 adaptivePressureWindows = 0
                 adaptiveRecoveryNotBefore = math.max(
                     adaptiveRecoveryNotBefore,
-                    os.clock() + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                    now + SETTINGS.ADAPTIVE_FAILURE_HOLD
                 )
+                persistRecoveryLock(
+                    SETTINGS.ADAPTIVE_FAILURE_HOLD,
+                    "quarantined failed placement"
+                )
+                resetAdaptiveWindow()
                 clearAdaptiveHistory()
+                return
+            end
+
+            recoveredFailureStreak = math.max(
+                0,
+                math.floor(tonumber(recoveredFailureStreak) or 0)
+            )
+
+            if circuitBreakerActive or recoveredFromCircuit then
+                adaptivePressureWindows = 0
+                adaptiveRecoveryNotBefore = math.max(
+                    adaptiveRecoveryNotBefore,
+                    now + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                )
+                resetAdaptiveWindow()
+                clearAdaptiveHistory()
+                return
+            end
+
+            adaptiveValidCycleIndex += 1
+            pruneIsolatedFailures()
+
+            -- One isolated failed cycle is not enough to alter pacing. Two
+            -- separate episodes inside the evidence window are.
+            if recoveredFailureStreak > 0 then
+                table.insert(isolatedFailureMarks, adaptiveValidCycleIndex)
+                adaptiveRecoveryNotBefore = math.max(
+                    adaptiveRecoveryNotBefore,
+                    now + SETTINGS.ADAPTIVE_FAILURE_HOLD
+                )
+                persistRecoveryLock(
+                    SETTINGS.ADAPTIVE_FAILURE_HOLD,
+                    "isolated failure quarantine"
+                )
+                resetAdaptiveWindow()
+                clearAdaptiveHistory()
+
+                if #isolatedFailureMarks
+                    >= SETTINGS.ISOLATED_FAILURES_TO_SLOW
+                then
+                    applyAdaptiveIntervalChange(
+                        currentInterval + SETTINGS.ISOLATED_FAILURE_STEP,
+                        "repeated isolated failures",
+                        {
+                            isolatedFailures = #isolatedFailureMarks,
+                            windowCycles = SETTINGS.ISOLATED_FAILURE_WINDOW,
+                        },
+                        SETTINGS.ADAPTIVE_FAILURE_HOLD
+                    )
+                end
+
                 return
             end
 
@@ -2008,63 +2553,41 @@ task.spawn(function()
                 adaptiveWindowRejected += 1
             end
 
-            if not cycleConfirmed then
-                adaptiveWindowFailed += 1
-            end
-
             if adaptiveWindowCycles < SETTINGS.ADAPTIVE_WINDOW then
                 return
             end
 
-            local previousInterval = currentInterval
             local rejectRate = adaptiveWindowRejected / adaptiveWindowCycles
-            local adjustmentReason = nil
-            local pressureDetected = false
-            local now = os.clock()
-            local historyCycles = #adaptiveHistory
+            local historyCycles = adaptiveHistoryCount
             local historyRejectRate = historyCycles > 0
                 and adaptiveHistoryRejected / historyCycles
                 or 0
+            local evidence = {
+                windowCycles = adaptiveWindowCycles,
+                windowRejected = adaptiveWindowRejected,
+                windowFailed = 0,
+                historyCycles = historyCycles,
+                historyRejectRate = historyRejectRate,
+            }
 
-            if adaptiveWindowFailed > 0 then
-                pressureDetected = true
-                currentInterval = math.min(
-                    SETTINGS.ADAPTIVE_MAX_INTERVAL,
-                    currentInterval
-                        + SETTINGS.ADAPTIVE_STEP_UP
-                        * math.min(2, adaptiveWindowFailed)
-                )
-                adaptivePressureWindows = 0
-                adaptiveRecoveryNotBefore = math.max(
-                    adaptiveRecoveryNotBefore,
-                    now + SETTINGS.ADAPTIVE_FAILURE_HOLD
-                )
-                adjustmentReason = adaptiveWindowFailed == 1
-                    and "unrecovered failed cycle"
-                    or "multiple unrecovered failed cycles"
-            elseif rejectRate >= SETTINGS.ADAPTIVE_HIGH_REJECT_RATE then
-                pressureDetected = true
+            if rejectRate >= SETTINGS.ADAPTIVE_HIGH_REJECT_RATE then
                 adaptivePressureWindows += 1
 
                 if adaptivePressureWindows >= SETTINGS.ADAPTIVE_PRESSURE_WINDOWS then
-                    currentInterval = math.min(
-                        SETTINGS.ADAPTIVE_MAX_INTERVAL,
-                        currentInterval + SETTINGS.ADAPTIVE_PRESSURE_STEP
-                    )
                     adaptivePressureWindows = 0
-                    adjustmentReason = "persistent recovered rejection pressure"
+
+                    if applyAdaptiveIntervalChange(
+                        currentInterval + SETTINGS.ADAPTIVE_PRESSURE_STEP,
+                        "persistent recovered rejection pressure",
+                        evidence,
+                        SETTINGS.ADAPTIVE_RECOVERY_HOLD
+                    )
+                    then
+                        return
+                    end
                 end
             else
                 adaptivePressureWindows = 0
-            end
-
-            local changedByPressure = currentInterval > previousInterval
-
-            if changedByPressure then
-                adaptiveRecoveryNotBefore = math.max(
-                    adaptiveRecoveryNotBefore,
-                    now + SETTINGS.ADAPTIVE_RECOVERY_HOLD
-                )
             end
 
             local longWindowReady = historyCycles >= SETTINGS.ADAPTIVE_LONG_WINDOW
@@ -2075,145 +2598,29 @@ task.spawn(function()
                 and historyRejectRate
                     <= SETTINGS.ADAPTIVE_RECOVERY_MAX_REJECT_RATE
             local recoveryHoldComplete = now >= adaptiveRecoveryNotBefore
+            local zoneHealthy = zoneHealthRemaining() <= 0
 
-            -- Short windows are permitted to slow the engine only. A speed
-            -- recovery requires a full long window collected at the current
-            -- interval plus the time hold. History is reset after every rate
-            -- change, so each faster step must prove itself independently.
-            if not pressureDetected
-                and math.abs(currentInterval - previousInterval) < 0.001
+            -- Speed recovery is deliberately asymmetric: one 0/20 window can
+            -- never speed the engine up. Every 0.05-second step needs at least
+            -- 300 valid cycles, 45 minutes, and no active zone/failure lock.
+            if rejectRate < SETTINGS.ADAPTIVE_HIGH_REJECT_RATE
                 and currentInterval > SETTINGS.ADAPTIVE_MIN_INTERVAL
                 and recoveryEvidenceClean
                 and recoveryHoldComplete
+                and zoneHealthy
             then
-                currentInterval = math.max(
-                    SETTINGS.ADAPTIVE_MIN_INTERVAL,
-                    currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN
+                if applyAdaptiveIntervalChange(
+                    currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN,
+                    "long-window stable recovery",
+                    evidence,
+                    SETTINGS.ADAPTIVE_RECOVERY_HOLD
                 )
-                adjustmentReason = "long-window stable recovery"
-            end
-
-            if math.abs(currentInterval - previousInterval) >= 0.001 then
-                dashboard.interval = currentInterval
-                dashboard.hourly = 3600 / currentInterval
-                dashboard.daily = 86400 / currentInterval
-                resetCalibrationSegment("adaptive interval adjustment")
-                print(string.format(
-                    "[Runtime] Adaptive | %.2fs -> %.2fs | %s "
-                        .. "| rejected %d/%d | failed %d",
-                    previousInterval,
-                    currentInterval,
-                    adjustmentReason or "window update",
-                    adaptiveWindowRejected,
-                    adaptiveWindowCycles,
-                    adaptiveWindowFailed
-                ))
-
-                local slowedDown = currentInterval > previousInterval
-                local protectiveProfileSaved = false
-
-                if slowedDown
-                    and SETTINGS.CALIBRATION
-                    and currentInterval > (
-                        tonumber(calibrationProfile.recommendedInterval)
-                            or SETTINGS.ADAPTIVE_MIN_INTERVAL
-                    )
                 then
-                    calibrationProfile.recommendedInterval = currentInterval
-                    calibrationProfile.provisional = true
-                    calibrationProfile.provisionalReason = adjustmentReason
-                    calibrationProfile.qualifiedCycles = 0
-                    calibrationProfile.qualifiedSeconds = 0
-                    protectiveProfileSaved = saveCalibrationProfile()
-                    dashboard.calibration = string.format(
-                        "%s protective %.2fs",
-                        protectiveProfileSaved and "Remembered" or "Session",
-                        currentInterval
-                    )
+                    return
                 end
-
-                local windowConfirmed = adaptiveWindowCycles - adaptiveWindowFailed
-                local cumulativeSuccessRate = cycles > 0
-                    and confirmed / cycles * 100
-                    or 0
-                local holdSeconds = slowedDown and (
-                    adaptiveWindowFailed > 0
-                        and SETTINGS.ADAPTIVE_FAILURE_HOLD
-                        or SETTINGS.ADAPTIVE_RECOVERY_HOLD
-                ) or SETTINGS.ADAPTIVE_RECOVERY_HOLD
-
-                sendWebhook({
-                    title = slowedDown
-                        and "Adaptive Rate Slowed"
-                        or "Adaptive Rate Recovered",
-                    description = slowedDown
-                        and "The controller detected placement pressure and increased the interval to protect long-run consistency."
-                        or string.format(
-                            "%d stable cycles plus the recovery hold allowed one cautious step toward the %.2f-second target.",
-                            SETTINGS.ADAPTIVE_LONG_WINDOW,
-                            SETTINGS.ADAPTIVE_MIN_INTERVAL
-                        ),
-                    color = slowedDown and 16753920 or 5763719,
-                    targetZone = SETTINGS.TARGET_ZONE,
-                    fields = {
-                        webhookField("Adjustment Reason", adjustmentReason or "Window update", false),
-                        webhookField("Previous Interval", string.format("%.2f seconds", previousInterval), true),
-                        webhookField("New Interval", string.format("%.2f seconds", currentInterval), true),
-                        webhookField("Change", string.format("%+.2f seconds", currentInterval - previousInterval), true),
-                        webhookField("Window Result", string.format("%d/%d confirmed", windowConfirmed, adaptiveWindowCycles), true),
-                        webhookField("Cycles With Rejections", string.format("%d/%d", adaptiveWindowRejected, adaptiveWindowCycles), true),
-                        webhookField("Window Rejection Rate", string.format("%.2f%%", rejectRate * 100), true),
-                        webhookField("Failed Cycles", adaptiveWindowFailed, true),
-                        webhookField(
-                            "Long Recovery Evidence",
-                            string.format(
-                                "%d/%d cycles | %.2f%% rejected | %d failed | %d second retries",
-                                historyCycles,
-                                SETTINGS.ADAPTIVE_LONG_WINDOW,
-                                historyRejectRate * 100,
-                                adaptiveHistoryFailed,
-                                adaptiveHistorySecondRetries
-                            ),
-                            false
-                        ),
-                        webhookField("Next Recovery Hold", formatDuration(holdSeconds), true),
-                        webhookField(
-                            "Calibration Memory",
-                            slowedDown
-                                and (
-                                    protectiveProfileSaved
-                                        and "Protective interval saved for the next relaunch"
-                                        or "Protective interval active for this session"
-                                )
-                                or "Faster interval must complete full calibration before being remembered",
-                            false
-                        ),
-                        webhookField(
-                            "Pressure Rule",
-                            string.format(
-                                "%.0f%% for %d consecutive windows",
-                                SETTINGS.ADAPTIVE_HIGH_REJECT_RATE * 100,
-                                SETTINGS.ADAPTIVE_PRESSURE_WINDOWS
-                            ),
-                            true
-                        ),
-                        webhookField("Cumulative Confirmed", string.format("%s/%s", formatInteger(confirmed), formatInteger(cycles)), true),
-                        webhookField("Cumulative Success", string.format("%.2f%%", cumulativeSuccessRate), true),
-                        webhookField("New Maximum Pace", string.format("%.1f/min | %.0f/day", 60 / currentInterval, 86400 / currentInterval), true),
-                        webhookField("Allowed Range", string.format("%.2f-%.2f seconds", SETTINGS.ADAPTIVE_MIN_INTERVAL, SETTINGS.ADAPTIVE_MAX_INTERVAL), true),
-                    },
-                })
-
-                adaptiveRecoveryNotBefore = math.max(
-                    adaptiveRecoveryNotBefore,
-                    now + holdSeconds
-                )
-                clearAdaptiveHistory()
             end
 
-            adaptiveWindowCycles = 0
-            adaptiveWindowRejected = 0
-            adaptiveWindowFailed = 0
+            resetAdaptiveWindow()
         end
 
         local function clearRejectionStreak()
@@ -2225,13 +2632,34 @@ task.spawn(function()
             circuitBreakerDelay = SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY
 
             if recoveredFromCircuit then
+                if circuitStartedAt then
+                    circuitDowntimeTotal += math.max(
+                        0,
+                        os.clock() - circuitStartedAt
+                    )
+                    circuitStartedAt = nil
+                end
+
                 adaptiveRecoveryNotBefore = math.max(
                     adaptiveRecoveryNotBefore,
                     os.clock() + SETTINGS.ADAPTIVE_FAILURE_HOLD
                 )
+                persistRecoveryLock(
+                    SETTINGS.ADAPTIVE_FAILURE_HOLD,
+                    "circuit breaker recovery"
+                )
                 clearAdaptiveHistory()
                 resetCalibrationSegment("circuit breaker recovered")
                 dashboard.state = "Calibrating"
+                dashboard.calibration = zoneHealthRemaining() > 0
+                    and (
+                        "Zone recovery lock • "
+                            .. formatDuration(zoneHealthRemaining())
+                    )
+                    or (
+                        "Recovery evidence lock • "
+                            .. formatDuration(SETTINGS.ADAPTIVE_FAILURE_HOLD)
+                    )
             end
 
             if rejectionAlertActive or recoveredFromCircuit then
@@ -2264,6 +2692,7 @@ task.spawn(function()
             end
 
             rejectionAlertActive = false
+            return recoveredStreak, recoveredFromCircuit
         end
 
         local function alertOnRejectionStreak()
@@ -2273,14 +2702,24 @@ task.spawn(function()
                 circuitBreakerActive = true
                 circuitBreakerDelay = SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY
                 circuitBreakerTrips += 1
+                circuitStartedAt = circuitStartedAt or os.clock()
                 rejectionAlertActive = true
                 calibrationSegmentContaminated = true
                 dashboard.state = "Circuit"
                 dashboard.calibration = "Excluded stuck-area episode"
+                local zoneUnhealthy, recentZoneCircuits = recordZoneCircuit()
+
+                if zoneUnhealthy then
+                    dashboard.calibration = "Zone unhealthy • recovery locked"
+                end
 
                 sendWebhook({
-                    title = "Placement Circuit Breaker Engaged",
-                    description = "Consecutive complete placement failures look more like an occupied/stuck area than ordinary timing pressure. Rapid placement has paused; the engine will use increasingly spaced diagnostic probes.",
+                    title = zoneUnhealthy
+                        and "Zone Marked Unhealthy"
+                        or "Placement Circuit Breaker Engaged",
+                    description = zoneUnhealthy
+                        and "This farming zone produced repeated circuit episodes inside the health window. Placement probes continue safely, but calibration and all speed recovery are locked so the account cannot learn a bad rate from a stuck event."
+                        or "Consecutive complete placement failures look more like an occupied/stuck area than ordinary timing pressure. Rapid placement has paused; the engine will use increasingly spaced diagnostic probes.",
                     color = 15548997,
                     targetZone = SETTINGS.TARGET_ZONE,
                     critical = true,
@@ -2290,6 +2729,14 @@ task.spawn(function()
                         webhookField("Maximum Probe Delay", string.format("%.0f seconds", SETTINGS.CIRCUIT_BREAKER_MAX_DELAY), true),
                         webhookField("Adaptive Interval", string.format("%.2f seconds", currentInterval), true),
                         webhookField("Circuit Trips", formatInteger(circuitBreakerTrips), true),
+                        webhookField("Recent Zone Circuits", formatInteger(recentZoneCircuits), true),
+                        webhookField(
+                            "Zone Recovery Lock",
+                            zoneUnhealthy
+                                and formatDuration(zoneHealthRemaining())
+                                or "Monitoring",
+                            true
+                        ),
                         webhookField("Total Server Rejections", formatInteger(rejected), true),
                         webhookField("Total Failed Cycles", formatInteger(failedCycles + 1), true),
                         webhookField("Last Server Response", tostring(lastResponse), true),
@@ -2348,6 +2795,8 @@ task.spawn(function()
             local nextAttemptAt = os.clock()
             local cycleHadServerReject = false
             local cycleUsedSecondRetry = false
+            local cycleRecoveredFailureStreak = 0
+            local cycleRecoveredFromCircuit = false
             local cycleRetryLimit = rejectedStreak >= SETTINGS.RETRY_DISABLE_AFTER
                 and 0
                 or SETTINGS.MAX_RETRIES
@@ -2478,7 +2927,13 @@ task.spawn(function()
                         end
                     end
 
-                    clearRejectionStreak()
+                    local recoveredStreak, recoveredFromCircuit = clearRejectionStreak()
+                    cycleRecoveredFailureStreak = math.max(
+                        cycleRecoveredFailureStreak,
+                        recoveredStreak or 0
+                    )
+                    cycleRecoveredFromCircuit = cycleRecoveredFromCircuit
+                        or recoveredFromCircuit == true
                     cycleFinished = true
                 elseif retryIndex < cycleRetryLimit then
                     local retryWait = retryIndex == 0
@@ -2500,7 +2955,13 @@ task.spawn(function()
                             lateConfirmations += 1
                         end
 
-                        clearRejectionStreak()
+                        local recoveredStreak, recoveredFromCircuit = clearRejectionStreak()
+                        cycleRecoveredFailureStreak = math.max(
+                            cycleRecoveredFailureStreak,
+                            recoveredStreak or 0
+                        )
+                        cycleRecoveredFromCircuit = cycleRecoveredFromCircuit
+                            or recoveredFromCircuit == true
                         cycleFinished = true
                     end
                 else
@@ -2553,7 +3014,9 @@ task.spawn(function()
                 updateAdaptiveRate(
                     cycleConfirmed,
                     cycleHadServerReject,
-                    cycleUsedSecondRetry
+                    cycleUsedSecondRetry,
+                    cycleRecoveredFailureStreak,
+                    cycleRecoveredFromCircuit
                 )
                 heartbeat("adaptive update complete")
 
