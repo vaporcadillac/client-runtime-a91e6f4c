@@ -1,5 +1,5 @@
 local env = getgenv()
-local LEDGER_BUILD = "fleet-ledger-1.1"
+local LEDGER_BUILD = "fleet-ledger-1.2"
 
 if env.GLEDGER_ENABLED == false then
     return
@@ -75,6 +75,10 @@ task.spawn(function()
         "Diamond Seed Bag",
         "Hasty Flag",
         "Sprinkler",
+        "Secret Key",
+        "Key Upper Half",
+        "Key Lower Half",
+        "Lucky Block",
     }
     local configuredItems = type(env.GLEDGER_ITEMS) == "table"
         and env.GLEDGER_ITEMS
@@ -622,13 +626,16 @@ task.spawn(function()
     local persistenceEnabled = readFile ~= nil and writeFile ~= nil
     local today = os.date("!%Y-%m-%d")
     local profile = {
-        schema = 1,
+        schema = 2,
         userId = LocalPlayer and LocalPlayer.UserId or 0,
         placeId = game.PlaceId,
         day = today,
         sessions = 1,
         dayStartGems = nil,
         dayStartItems = {},
+        dayDiamondGain = 0,
+        dayPinatasConsumed = 0,
+        dayLootGained = {},
         lastGems = nil,
         lastItems = {},
         lastSeenAt = 0,
@@ -663,10 +670,18 @@ task.spawn(function()
         end
 
         profile = decoded
-        profile.schema = 1
+        profile.schema = 2
         profile.sessions = math.max(0, tonumber(profile.sessions) or 0) + 1
         profile.dayStartItems = type(profile.dayStartItems) == "table"
             and profile.dayStartItems
+            or {}
+        profile.dayDiamondGain = math.max(0, tonumber(profile.dayDiamondGain) or 0)
+        profile.dayPinatasConsumed = math.max(
+            0,
+            math.floor(tonumber(profile.dayPinatasConsumed) or 0)
+        )
+        profile.dayLootGained = type(profile.dayLootGained) == "table"
+            and profile.dayLootGained
             or {}
         profile.lastItems = type(profile.lastItems) == "table"
             and profile.lastItems
@@ -676,6 +691,9 @@ task.spawn(function()
             profile.day = today
             profile.dayStartGems = nil
             profile.dayStartItems = {}
+            profile.dayDiamondGain = 0
+            profile.dayPinatasConsumed = 0
+            profile.dayLootGained = {}
             profile.sessions = 1
         end
     end
@@ -685,7 +703,7 @@ task.spawn(function()
             return false
         end
 
-        profile.schema = 1
+        profile.schema = 2
         profile.lastSeenAt = os.time()
         profile.ledgerBuild = LEDGER_BUILD
         local encodeOk, encoded = pcall(
@@ -747,6 +765,18 @@ task.spawn(function()
     local unknownFarmSamples = 0
     local minimumFps = nil
     local maximumPing = nil
+    local windowDiamondGain = 0
+    local windowPinatasConsumed = 0
+    local windowLootGained = {}
+
+    profile.dayDiamondGain = math.max(0, tonumber(profile.dayDiamondGain) or 0)
+    profile.dayPinatasConsumed = math.max(
+        0,
+        math.floor(tonumber(profile.dayPinatasConsumed) or 0)
+    )
+    profile.dayLootGained = type(profile.dayLootGained) == "table"
+        and profile.dayLootGained
+        or {}
 
     if tonumber(profile.dayStartGems) == nil then
         profile.dayStartGems = initialGems
@@ -761,6 +791,26 @@ task.spawn(function()
     profile.lastGems = initialGems
     profile.lastItems = table.clone(initialItems)
     saveProfile()
+
+    local function addPositiveAmount(amounts, key, amount)
+        if amount > 0 then
+            amounts[key] = (tonumber(amounts[key]) or 0) + amount
+        end
+    end
+
+    local function namedAmounts(amounts)
+        local result = {}
+
+        for _, key in ipairs(trackedOrder) do
+            local amount = math.max(0, math.floor(tonumber(amounts[key]) or 0))
+
+            if amount > 0 and key ~= normalize("Mini Pinata") then
+                result[trackedItems[key]] = amount
+            end
+        end
+
+        return result
+    end
 
     local function itemDeltaLines(startItems, endItems, onlyMeaningful)
         local lines = {}
@@ -787,10 +837,10 @@ task.spawn(function()
 
     local function makeReport(now)
         local elapsed = math.max(1, now - reportStartedAt)
-        local gemDelta = currentGems - reportStartGems
+        local gemDelta = windowDiamondGain
         local gemsPerHour = gemDelta / elapsed * 3600
         local projectedDay = gemsPerHour * 24
-        local dayDelta = currentGems - (tonumber(profile.dayStartGems) or currentGems)
+        local dayDelta = profile.dayDiamondGain
         local knownFarmSamples = math.max(0, totalSamples - unknownFarmSamples)
         local farmUptime = knownFarmSamples > 0
             and farmSamples / knownFarmSamples * 100
@@ -800,10 +850,7 @@ task.spawn(function()
             and string.format("%.2f%%", farmUptime)
             or "Unavailable"
         local miniKey = normalize("Mini Pinata")
-        local pinatasUsed = math.max(
-            0,
-            (reportStartItems[miniKey] or 0) - (currentItems[miniKey] or 0)
-        )
+        local pinatasUsed = windowPinatasConsumed
         local valuePerPinata = pinatasUsed > 0 and gemDelta / pinatasUsed or nil
         local status = farmUptime == nil and "Farm detector unavailable"
             or farmUptime >= 95 and "Excellent"
@@ -906,6 +953,9 @@ task.spawn(function()
         unknownFarmSamples = 0
         minimumFps = nil
         maximumPing = nil
+        windowDiamondGain = 0
+        windowPinatasConsumed = 0
+        windowLootGained = {}
         nextReportAt = now + SETTINGS.REPORT_SECONDS
     end
 
@@ -920,6 +970,9 @@ task.spawn(function()
         profile.sessions = 1
         profile.dayStartGems = currentGems
         profile.dayStartItems = table.clone(currentItems)
+        profile.dayDiamondGain = 0
+        profile.dayPinatasConsumed = 0
+        profile.dayLootGained = {}
         saveProfile()
     end
 
@@ -936,6 +989,8 @@ task.spawn(function()
         local data = getSaveData()
 
         if data then
+            local previousGems = currentGems
+            local previousItems = currentItems
             local gems = findGemCount(data)
 
             if gems ~= nil then
@@ -943,6 +998,26 @@ task.spawn(function()
             end
 
             currentItems = scanTrackedItems(data)
+
+            local gemGain = math.max(0, currentGems - previousGems)
+            windowDiamondGain += gemGain
+            profile.dayDiamondGain += gemGain
+
+            local miniPinataKey = normalize("Mini Pinata")
+
+            for _, key in ipairs(trackedOrder) do
+                local delta = (tonumber(currentItems[key]) or 0)
+                    - (tonumber(previousItems[key]) or 0)
+
+                if key == miniPinataKey and delta < 0 then
+                    local consumed = -delta
+                    windowPinatasConsumed += consumed
+                    profile.dayPinatasConsumed += consumed
+                elseif key ~= miniPinataKey and delta > 0 then
+                    addPositiveAmount(windowLootGained, key, delta)
+                    addPositiveAmount(profile.dayLootGained, key, delta)
+                end
+            end
         end
 
         local farmState = readFarmState()
@@ -966,31 +1041,23 @@ task.spawn(function()
         end
 
         local liveWindowSeconds = math.max(1, os.clock() - reportStartedAt)
-        local liveWindowNetGain = currentGems - reportStartGems
+        local liveWindowNetGain = windowDiamondGain
         local liveHourlyNetGain = liveWindowNetGain / liveWindowSeconds * 3600
-        local liveDailyNetGain = currentGems
-            - (tonumber(profile.dayStartGems) or currentGems)
-        local miniPinataKey = normalize("Mini Pinata")
-        local liveWindowPinatasConsumed = math.max(
-            0,
-            (tonumber(reportStartItems[miniPinataKey]) or 0)
-                - (tonumber(currentItems[miniPinataKey]) or 0)
-        )
-        local liveDailyPinatasConsumed = math.max(
-            0,
-            (tonumber(profile.dayStartItems[miniPinataKey]) or 0)
-                - (tonumber(currentItems[miniPinataKey]) or 0)
-        )
+        local liveDailyNetGain = profile.dayDiamondGain
+        local liveWindowPinatasConsumed = windowPinatasConsumed
+        local liveDailyPinatasConsumed = profile.dayPinatasConsumed
 
         env.GLEDGER_LIVE_SNAPSHOT = {
             build = LEDGER_BUILD,
-            profitBasis = "direct_gems_only",
+            profitBasis = "earned_diamonds_plus_rap_loot_pending",
             windowNetGain = liveWindowNetGain,
             hourlyNetGain = liveHourlyNetGain,
             dailyNetGain = liveDailyNetGain,
             windowSeconds = liveWindowSeconds,
             windowPinatasConsumed = liveWindowPinatasConsumed,
             dailyPinatasConsumed = liveDailyPinatasConsumed,
+            windowLootGained = namedAmounts(windowLootGained),
+            dailyLootGained = namedAmounts(profile.dayLootGained),
             account = LocalPlayer and LocalPlayer.Name or "Unknown",
             role = SETTINGS.ROLE,
             zone = SETTINGS.TARGET_ZONE,
