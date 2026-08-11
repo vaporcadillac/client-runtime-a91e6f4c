@@ -2064,6 +2064,21 @@ task.spawn(function()
             local supplyMinutes = observedPerMinute > 0
                 and lastKnownTotal / observedPerMinute
                 or 0
+            local ledgerSnapshot = type(env.GLEDGER_LIVE_SNAPSHOT) == "table"
+                and env.GLEDGER_LIVE_SNAPSHOT
+                or {}
+            local windowNetGain = math.max(
+                0,
+                tonumber(ledgerSnapshot.windowNetGain) or 0
+            )
+            local hourlyNetGain = math.max(
+                0,
+                tonumber(ledgerSnapshot.hourlyNetGain) or 0
+            )
+            local dailyNetGain = math.max(
+                0,
+                tonumber(ledgerSnapshot.dailyNetGain) or 0
+            )
             local payload = {
                 accountName = LocalPlayer and LocalPlayer.Name or "unknown",
                 robloxUserId = tostring(LocalPlayer and LocalPlayer.UserId or 0),
@@ -2078,9 +2093,9 @@ task.spawn(function()
                 runtimeSeconds = elapsed,
                 lastConfirmationAt = telemetryLastConfirmationAt,
                 uptimePercent = uptimePercent,
-                windowNetGain = 0,
-                hourlyNetGain = 0,
-                dailyNetGain = 0,
+                windowNetGain = windowNetGain,
+                hourlyNetGain = hourlyNetGain,
+                dailyNetGain = dailyNetGain,
             }
 
             local encodedOk, body = pcall(HttpService.JSONEncode, HttpService, payload)
