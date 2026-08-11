@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "calibrated-autoremote-13"
+local ENGINE_BUILD = "calibrated-autoremote-14"
 
 if env.GPINATA_ENABLED == false then
     return
@@ -476,21 +476,6 @@ task.spawn(function()
         watchdogTimeout
     ))
 
-    sendWebhook({
-        title = "Pinata Monitor Online",
-        description = "The engine loaded successfully and is waiting for GScript to settle this account inside its farming area.",
-        color = 3447003,
-        targetZone = tonumber(env.GZONE_TO) or 39,
-        fields = {
-            webhookField("Configured Baseline", string.format("%.2f seconds", numberSetting("GPINATA_INTERVAL", 6.2)), true),
-            webhookField("Adaptive Controller", env.GPINATA_ADAPTIVE ~= false and "Enabled" or "Disabled", true),
-            webhookField("Startup Delay", string.format("%.0f seconds", numberSetting("GPINATA_STARTUP_WAIT", 60)), true),
-            webhookField("Required Stability", string.format("%.0f seconds", numberSetting("GPINATA_STABLE_WAIT", 20)), true),
-            webhookField("Watchdog", string.format("%.0f seconds", watchdogTimeout), true),
-            webhookField("Webhook Delivery", "Connected", true),
-        },
-    })
-
     local function supervisorWait(seconds)
         local deadline = os.clock() + seconds
 
@@ -587,9 +572,13 @@ task.spawn(function()
             STABLE_WAIT = math.max(0, numberSetting("GPINATA_STABLE_WAIT", 20)),
             FPS = math.max(1, numberSetting("GPINATA_FPS", 10)),
             STATUS_EVERY = math.max(1, math.floor(numberSetting("GPINATA_STATUS_EVERY", 100))),
-            WEBHOOK_STATUS_EVERY = math.max(
-                20,
-                math.floor(numberSetting("GPINATA_WEBHOOK_STATUS_EVERY", 100))
+            WEBHOOK_STATUS_SECONDS = math.max(
+                300,
+                numberSetting("GPINATA_WEBHOOK_STATUS_SECONDS", 35 * 60)
+            ),
+            WEBHOOK_FARM_LOSS_DELAY = math.max(
+                30,
+                numberSetting("GPINATA_WEBHOOK_FARM_LOSS_DELAY", 60)
             ),
             WEBHOOK_ALERT_REJECT_STREAK = math.max(
                 2,
@@ -889,18 +878,6 @@ task.spawn(function()
             end
 
             lastResolvedEndpointLabel = endpoint.label
-            sendWebhook({
-                title = "Remote Route Resolved",
-                description = "The placement communication route was resolved and cached. Ordinary server rejections will not trigger rediscovery.",
-                color = endpoint.strategy == "Known route" and 5763719 or 16753920,
-                targetZone = SETTINGS.TARGET_ZONE,
-                fields = {
-                    webhookField("Resolution Strategy", endpoint.strategy, true),
-                    webhookField("Endpoint", endpoint.label, false),
-                    webhookField("Endpoint Type", endpoint.kind, true),
-                    webhookField("Resolve Mode", SETTINGS.AUTO_REMOTE and "Automatic fallback" or "Known route only", true),
-                },
-            })
         end
 
         local function findDirectEndpoint(network, aliases)
@@ -1137,6 +1114,7 @@ task.spawn(function()
             local stablePosition = nil
             local waitStartedAt = os.clock()
             local isRecovery = farmReadyCount > 0
+            local lossAlerted = false
 
             dashboard.state = isRecovery and "Paused" or "Booting"
 
@@ -1145,22 +1123,27 @@ task.spawn(function()
                 SETTINGS.TARGET_ZONE
             ))
 
-            if isRecovery then
-                sendWebhook({
-                    title = "Farm Area Lost",
-                    description = "Placement has paused until GScript returns this account to a stable farming area.",
-                    color = 16753920,
-                    targetZone = SETTINGS.TARGET_ZONE,
-                    fields = {
-                        webhookField("Placement State", "Paused", true),
-                        webhookField("Stability Required", string.format("%.0f seconds", SETTINGS.STABLE_WAIT), true),
-                        webhookField("Wait Timeout", string.format("%.0f seconds", SETTINGS.FARM_WAIT_TIMEOUT), true),
-                    },
-                })
-            end
-
             while not env.STOP_MINI_PINATA_FAST_PLACER do
                 heartbeat("waiting for stable farm area")
+
+                if isRecovery
+                    and not lossAlerted
+                    and os.clock() - waitStartedAt
+                        >= SETTINGS.WEBHOOK_FARM_LOSS_DELAY
+                then
+                    lossAlerted = true
+                    sendWebhook({
+                        title = "Farm Area Lost",
+                        description = "Placement has remained paused long enough to require attention. The engine is waiting for GScript to restore a stable farming position.",
+                        color = 16753920,
+                        targetZone = SETTINGS.TARGET_ZONE,
+                        fields = {
+                            webhookField("Placement State", "Paused", true),
+                            webhookField("Paused For", formatDuration(os.clock() - waitStartedAt), true),
+                            webhookField("Wait Timeout", string.format("%.0f seconds", SETTINGS.FARM_WAIT_TIMEOUT), true),
+                        },
+                    })
+                end
 
                 if os.clock() - waitStartedAt >= SETTINGS.FARM_WAIT_TIMEOUT then
                     error(string.format(
@@ -1195,7 +1178,7 @@ task.spawn(function()
 
                         farmReadyCount += 1
 
-                        if isRecovery then
+                        if lossAlerted then
                             sendWebhook({
                                 title = "Farm Area Recovered",
                                 description = "GScript returned the account to a stable farming area. Placement has resumed.",
@@ -1601,59 +1584,8 @@ task.spawn(function()
             ))
         end
 
-        sendWebhook({
-            title = "Mini Pinata Engine Started",
-            description = "The account is stable inside its farming area and automatic placement is active.",
-            color = 5763719,
-            targetZone = SETTINGS.TARGET_ZONE,
-            fields = {
-                webhookField("Inventory Remaining", formatInteger(initialTotal), true),
-                webhookField("Starting Interval", string.format("%.2f seconds", currentInterval), true),
-                webhookField(
-                    "Adaptive Range",
-                    SETTINGS.ADAPTIVE
-                        and string.format(
-                            "%.2f-%.2f seconds",
-                            SETTINGS.ADAPTIVE_MIN_INTERVAL,
-                            SETTINGS.ADAPTIVE_MAX_INTERVAL
-                        )
-                        or "Disabled",
-                    true
-                ),
-                webhookField("Pressure Window", string.format("%d cycles", SETTINGS.ADAPTIVE_WINDOW), true),
-                webhookField("Recovery Window", string.format("%d cycles", SETTINGS.ADAPTIVE_LONG_WINDOW), true),
-                webhookField("Recovery Hold", formatDuration(SETTINGS.ADAPTIVE_RECOVERY_HOLD), true),
-                webhookField(
-                    "Calibration",
-                    SETTINGS.CALIBRATION
-                        and string.format(
-                            "%d cycles + %s",
-                            SETTINGS.CALIBRATION_MIN_CYCLES,
-                            formatDuration(SETTINGS.CALIBRATION_MIN_SECONDS)
-                        )
-                        or "Disabled",
-                    true
-                ),
-                webhookField("Calibration Storage", calibrationPersistent and "Persistent" or "Session only", true),
-                webhookField("Auto-Remote", SETTINGS.AUTO_REMOTE and "Fallback enabled" or "Known route only", true),
-                webhookField(
-                    "Retry Policy",
-                    string.format(
-                        "%d max | %.2fs normal | %.2fs recovery",
-                        SETTINGS.MAX_RETRIES,
-                        SETTINGS.RETRY_DELAY,
-                        SETTINGS.RECOVERY_RETRY_DELAY
-                    ),
-                    true
-                ),
-                webhookField("Remote Timeout", string.format("%.1f seconds", SETTINGS.REMOTE_TIMEOUT), true),
-                webhookField("FPS Cap", SETTINGS.FPS, true),
-                webhookField("Watchdog", string.format("%.0f seconds", watchdogTimeout), true),
-                webhookField("Projected Maximum", string.format("%.1f/hour | %.0f/day", 3600 / currentInterval, 86400 / currentInterval), true),
-            },
-        })
-
         local placementRunStartedAt = os.clock()
+        local lastWebhookStatusAt = placementRunStartedAt
         local cycles = 0
         local confirmed = 0
         local remoteCalls = 0
@@ -1806,24 +1738,6 @@ task.spawn(function()
             )
             dashboard.state = "Running"
 
-            sendWebhook({
-                title = saved
-                    and "Account Calibration Remembered"
-                    or "Account Calibration Qualified",
-                description = saved
-                    and "This account and area sustained the current placement interval long enough to use it as the starting recommendation after future Volt relaunches."
-                    or "The interval passed sustained calibration, but persistent executor file storage was unavailable; it can only be used during this client session.",
-                color = 5763719,
-                targetZone = SETTINGS.TARGET_ZONE,
-                fields = {
-                    webhookField("Qualified Interval", string.format("%.2f seconds", currentInterval), true),
-                    webhookField("Evidence", string.format("%d cycles • %s", calibrationSegmentCycles, formatDuration(elapsed)), true),
-                    webhookField("Initial Rejection Rate", string.format("%.2f%%", rejectRate * 100), true),
-                    webhookField("Failed Cycles", calibrationSegmentFailed, true),
-                    webhookField("Second Retries", calibrationSegmentSecondRetries, true),
-                    webhookField("Profile Scope", string.format("Account %s • Area %d", tostring(LocalPlayer.UserId), SETTINGS.TARGET_ZONE), false),
-                },
-            })
         end
 
         local function recordConfirmation(amountUsed, totalAfter)
@@ -1850,9 +1764,10 @@ task.spawn(function()
                 return
             end
 
+            local now = os.clock()
             local shouldPrint = cycles % SETTINGS.STATUS_EVERY == 0
             local shouldWebhook = webhookEnabled
-                and cycles % SETTINGS.WEBHOOK_STATUS_EVERY == 0
+                and now - lastWebhookStatusAt >= SETTINGS.WEBHOOK_STATUS_SECONDS
 
             if not shouldPrint and not shouldWebhook then
                 return
@@ -1906,6 +1821,7 @@ task.spawn(function()
             end
 
             if shouldWebhook then
+                lastWebhookStatusAt = now
                 local initialAccepted = math.max(
                     0,
                     cycles - recoveredCycles - failedCycles
@@ -1914,8 +1830,8 @@ task.spawn(function()
                     and initialAccepted / cycles * 100
                     or 0
                 sendWebhook({
-                    title = "Placement Status - " .. formatInteger(cycles) .. " Cycles",
-                    description = "A compact health report for the current placement run. The dashboard above always reflects live gems, remaining piñatas, interval and observed placement speed.",
+                    title = "35-Minute Placement Update",
+                    description = "Scheduled health report. The dashboard reflects live gems, remaining piñatas, interval and observed placement speed.",
                     color = failedCycles == 0 and recoveryRate < 5
                         and 3447003
                         or 16753920,
@@ -1985,10 +1901,9 @@ task.spawn(function()
                         webhookField(
                             "🕒 Run Snapshot",
                             string.format(
-                                "Run uptime: %s\nClient uptime: %s\nRemaining supply: %s",
-                                formatDuration(elapsed),
-                                formatDuration(os.clock() - bootStartedAt),
-                                formatInteger(lastKnownTotal)
+                                "Remaining supply: %s\nCompleted cycles: %s\nNext scheduled update: 35 minutes",
+                                formatInteger(lastKnownTotal),
+                                formatInteger(cycles)
                             ),
                             false
                         ),
@@ -2536,28 +2451,12 @@ task.spawn(function()
                 else
                     errors += 1
                     consecutiveRemoteErrors += 1
-                    local failedEndpointLabel = endpoint.label
                     ConsumeEndpoint = nil
                     lastResolvedEndpointLabel = nil
                     dashboard.remote = "Re-resolving after error"
 
                     if errors == 1 or errors % 10 == 0 then
                         warn("[Runtime] Remote failed: " .. tostring(response))
-                    end
-
-                    if consecutiveRemoteErrors == 1 then
-                        sendWebhook({
-                            title = "Remote Route Invalidated",
-                            description = "A genuine communication error invalidated the cached endpoint. Automatic resolution will run before the next placement attempt. A normal server response of `false` does not trigger this process.",
-                            color = 16753920,
-                            targetZone = SETTINGS.TARGET_ZONE,
-                            fields = {
-                                webhookField("Failed Endpoint", failedEndpointLabel, false),
-                                webhookField("Error", tostring(response), false),
-                                webhookField("Resolver State", "Re-resolving", true),
-                                webhookField("Consecutive Remote Errors", consecutiveRemoteErrors, true),
-                            },
-                        })
                     end
 
                     if consecutiveRemoteErrors >= SETTINGS.REMOTE_ERROR_RESTART_AFTER then
@@ -2576,21 +2475,6 @@ task.spawn(function()
                             firstRetryRecoveries += 1
                         elseif retryIndex >= 2 then
                             secondRetryRecoveries += 1
-
-                            sendWebhook({
-                                title = "Recovery Retry Succeeded",
-                                description = "The normal retry was still rejected, but the slower recovery retry placed the Mini Pinata successfully and prevented a failed cycle.",
-                                color = 16753920,
-                                targetZone = SETTINGS.TARGET_ZONE,
-                                fields = {
-                                    webhookField("Placement Cycle", formatInteger(cycles), true),
-                                    webhookField("Recovery Delay", string.format("%.2f seconds", SETTINGS.RECOVERY_RETRY_DELAY), true),
-                                    webhookField("Current Interval", string.format("%.2f seconds", currentInterval), true),
-                                    webhookField("Inventory Remaining", formatInteger(lastKnownTotal), true),
-                                    webhookField("Second-Retry Recoveries", formatInteger(secondRetryRecoveries), true),
-                                    webhookField("Failed Cycles Avoided", formatInteger(secondRetryRecoveries), true),
-                                },
-                            })
                         end
                     end
 
@@ -2622,23 +2506,6 @@ task.spawn(function()
                 else
                     if cycleHadServerReject then
                         rejectedStreak += 1
-
-                        if rejectedStreak == 1 then
-                            sendWebhook({
-                                title = "Placement Cycle Unconfirmed",
-                                description = "The placement cycle remained unconfirmed after all configured attempts. The engine remains active and will continue after controlled backoff.",
-                                color = 16753920,
-                                targetZone = SETTINGS.TARGET_ZONE,
-                                fields = {
-                                    webhookField("Placement Cycle", formatInteger(cycles), true),
-                                    webhookField("Attempts Used", formatInteger(cycleRetryLimit + 1), true),
-                                    webhookField("Current Interval", string.format("%.2f seconds", currentInterval), true),
-                                    webhookField("Next Delay", string.format("%.2f seconds", math.max(currentInterval, getRejectionBackoff(rejectedStreak))), true),
-                                    webhookField("Total Failed Cycles", formatInteger(failedCycles + 1), true),
-                                    webhookField("Last Server Response", tostring(lastResponse), true),
-                                },
-                            })
-                        end
 
                         local circuitWasAlreadyActive = circuitBreakerActive
                         alertOnRejectionStreak()
@@ -2751,40 +2618,40 @@ task.spawn(function()
         dashboard.successRate = finalSuccessRate
         dashboard.pinatas = lastKnownTotal
 
-        sendWebhook({
-            title = noItemsRemain and "Mini Pinata Inventory Exhausted" or "Mini Pinata Engine Stopped",
-            description = noItemsRemain
-                and "The engine stopped cleanly after using the final available Mini Pinata."
-                or "The placement run ended because the engine received a stop signal.",
-            color = noItemsRemain and 16753920 or 9807270,
-            targetZone = SETTINGS.TARGET_ZONE,
-            fields = {
-                webhookField("Placement Cycles", formatInteger(cycles), true),
-                webhookField("Confirmed Placements", formatInteger(confirmed), true),
-                webhookField("Cycle Success Rate", string.format("%.2f%%", finalSuccessRate), true),
-                webhookField("Remote Calls", formatInteger(remoteCalls), true),
-                webhookField("Retries", formatInteger(retries), true),
-                webhookField("Recovered-Cycle Rate", string.format("%.2f%%", finalRecoveryRate), true),
-                webhookField(
-                    "Retry Recovery Details",
-                    string.format(
-                        "Recovered cycles: %s | First retry: %s | Second retry: %s | Late confirmation: %s",
-                        formatInteger(recoveredCycles),
-                        formatInteger(firstRetryRecoveries),
-                        formatInteger(secondRetryRecoveries),
-                        formatInteger(lateConfirmations)
+        if noItemsRemain then
+            sendWebhook({
+                title = "Mini Pinata Inventory Exhausted",
+                description = "The engine stopped cleanly after using the final available Mini Pinata.",
+                color = 16753920,
+                targetZone = SETTINGS.TARGET_ZONE,
+                fields = {
+                    webhookField("Placement Cycles", formatInteger(cycles), true),
+                    webhookField("Confirmed Placements", formatInteger(confirmed), true),
+                    webhookField("Cycle Success Rate", string.format("%.2f%%", finalSuccessRate), true),
+                    webhookField("Remote Calls", formatInteger(remoteCalls), true),
+                    webhookField("Retries", formatInteger(retries), true),
+                    webhookField("Recovered-Cycle Rate", string.format("%.2f%%", finalRecoveryRate), true),
+                    webhookField(
+                        "Retry Recovery Details",
+                        string.format(
+                            "Recovered cycles: %s | First retry: %s | Second retry: %s | Late confirmation: %s",
+                            formatInteger(recoveredCycles),
+                            formatInteger(firstRetryRecoveries),
+                            formatInteger(secondRetryRecoveries),
+                            formatInteger(lateConfirmations)
+                        ),
+                        false
                     ),
-                    false
-                ),
-                webhookField("Server Rejections", formatInteger(rejected), true),
-                webhookField("Failed Cycles", formatInteger(failedCycles), true),
-                webhookField("Remote Errors", formatInteger(errors), true),
-                webhookField("Remote Timeouts", formatInteger(timeouts), true),
-                webhookField("Final Interval", string.format("%.2f seconds", currentInterval), true),
-                webhookField("Observed Throughput", string.format("%.1f/hour | %.0f/day", finalPerHour, finalPerDay), true),
-                webhookField("Inventory Remaining", formatInteger(lastKnownTotal), true),
-            },
-        })
+                    webhookField("Server Rejections", formatInteger(rejected), true),
+                    webhookField("Failed Cycles", formatInteger(failedCycles), true),
+                    webhookField("Remote Errors", formatInteger(errors), true),
+                    webhookField("Remote Timeouts", formatInteger(timeouts), true),
+                    webhookField("Final Interval", string.format("%.2f seconds", currentInterval), true),
+                    webhookField("Observed Throughput", string.format("%.1f/hour | %.0f/day", finalPerHour, finalPerDay), true),
+                    webhookField("Inventory Remaining", formatInteger(lastKnownTotal), true),
+                },
+            })
+        end
 
         return noItemsRemain and "no_items" or "stopped"
     end
