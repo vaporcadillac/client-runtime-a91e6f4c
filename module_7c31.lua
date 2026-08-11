@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "calibrated-autoremote-11"
+local ENGINE_BUILD = "calibrated-autoremote-12"
 
 if env.GPINATA_ENABLED == false then
     return
@@ -1291,25 +1291,82 @@ task.spawn(function()
             ) or 1
         end
 
-        local function currencyAmount(value)
-            if type(value) == "number" then
-                return value
+        local function currencyAmount(value, depth)
+            depth = depth or 0
+
+            if depth > 2 then
+                return nil
+            end
+
+            if type(value) == "number" or type(value) == "string" then
+                local amount = tonumber(value)
+
+                if amount and amount >= 0 and amount == amount then
+                    return amount
+                end
+
+                return nil
             end
 
             if type(value) ~= "table" then
                 return nil
             end
 
-            return tonumber(
-                value._am
-                or value.am
-                or value.amount
-                or value.Amount
-                or value.quantity
-                or value.Quantity
-                or value.value
-                or value.Value
-            )
+            for _, candidate in ipairs({
+                value._am,
+                value.am,
+                value.amount,
+                value.Amount,
+                value.quantity,
+                value.Quantity,
+                value.value,
+                value.Value,
+                value.balance,
+                value.Balance,
+            }) do
+                local amount = currencyAmount(candidate, depth + 1)
+
+                if amount ~= nil then
+                    return amount
+                end
+            end
+
+            return nil
+        end
+
+        local function gemCountInContainer(container)
+            if type(container) ~= "table" then
+                return nil
+            end
+
+            local best = nil
+
+            for key, value in pairs(container) do
+                local keyName = normalize(key)
+                local itemName = type(value) == "table"
+                    and normalize(
+                        value.id
+                        or value._id
+                        or value.ID
+                        or value.Name
+                        or value.name
+                    )
+                    or ""
+
+                if keyName == "diamonds"
+                    or keyName == "gems"
+                    or itemName == "diamonds"
+                    or itemName == "gems"
+                then
+                    local amount = currencyAmount(value)
+
+                    if amount ~= nil and (best == nil or amount > best) then
+                        best = amount
+                    end
+                end
+            end
+
+            return best
         end
 
         local function findGemCount(data)
@@ -1317,52 +1374,36 @@ task.spawn(function()
                 return nil
             end
 
-            for _, key in ipairs({ "Diamonds", "diamonds", "Gems", "gems" }) do
-                local direct = currencyAmount(data[key])
-
-                if direct then
-                    return direct
-                end
-            end
-
             local inventory = type(data.Inventory) == "table"
                 and data.Inventory
                 or nil
+
+            -- Current PS99 saves keep active balances in Inventory.Currency.
+            -- Check those containers before legacy top-level fields, which may
+            -- remain present as a stale numeric zero. In Lua, zero is truthy,
+            -- so returning the first value previously masked the live balance.
             local containers = {
+                inventory and inventory.Currency,
+                inventory and inventory.Currencies,
                 data.Currency,
                 data.Currencies,
                 data.currency,
                 data.currencies,
-                inventory and inventory.Currency,
-                inventory and inventory.Currencies,
             }
 
             for _, container in ipairs(containers) do
-                if type(container) == "table" then
-                    for key, value in pairs(container) do
-                        local keyName = normalize(key)
-                        local itemName = type(value) == "table"
-                            and normalize(
-                                value.id
-                                or value._id
-                                or value.ID
-                                or value.Name
-                                or value.name
-                            )
-                            or ""
+                local amount = gemCountInContainer(container)
 
-                        if keyName == "diamonds"
-                            or keyName == "gems"
-                            or itemName == "diamonds"
-                            or itemName == "gems"
-                        then
-                            local amount = currencyAmount(value)
+                if amount ~= nil then
+                    return amount
+                end
+            end
 
-                            if amount then
-                                return amount
-                            end
-                        end
-                    end
+            for _, key in ipairs({ "Diamonds", "diamonds", "Gems", "gems" }) do
+                local direct = currencyAmount(data[key])
+
+                if direct ~= nil then
+                    return direct
                 end
             end
 
