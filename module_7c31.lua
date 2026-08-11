@@ -43,9 +43,43 @@ task.spawn(function()
 
     local function runEngine()
         local SETTINGS = {
-            -- 6.2 seconds leaves a small safety margin above the observed
-            -- server boundary while retaining nearly all daily throughput.
+            -- Start at the consistency-first 6.2-second target. The controller may
+            -- slow an individual account under server pressure, then recover
+            -- toward this target after stable observation windows.
             INTERVAL = math.max(1.5, numberSetting("GPINATA_INTERVAL", 6.2)),
+            ADAPTIVE = env.GPINATA_ADAPTIVE ~= false,
+            ADAPTIVE_MIN_INTERVAL = math.max(
+                1.5,
+                numberSetting("GPINATA_ADAPTIVE_MIN_INTERVAL", 6.2)
+            ),
+            ADAPTIVE_MAX_INTERVAL = math.max(
+                1.5,
+                numberSetting("GPINATA_ADAPTIVE_MAX_INTERVAL", 8)
+            ),
+            ADAPTIVE_WINDOW = math.max(
+                10,
+                math.floor(numberSetting("GPINATA_ADAPTIVE_WINDOW", 20))
+            ),
+            ADAPTIVE_STEP_UP = math.max(
+                0.01,
+                numberSetting("GPINATA_ADAPTIVE_STEP_UP", 0.15)
+            ),
+            ADAPTIVE_STEP_DOWN = math.max(
+                0.01,
+                numberSetting("GPINATA_ADAPTIVE_STEP_DOWN", 0.05)
+            ),
+            ADAPTIVE_HIGH_REJECT_RATE = math.max(
+                0,
+                numberSetting("GPINATA_ADAPTIVE_HIGH_REJECT_RATE", 0.08)
+            ),
+            ADAPTIVE_LOW_REJECT_RATE = math.max(
+                0,
+                numberSetting("GPINATA_ADAPTIVE_LOW_REJECT_RATE", 0.05)
+            ),
+            ADAPTIVE_STABLE_WINDOWS = math.max(
+                1,
+                math.floor(numberSetting("GPINATA_ADAPTIVE_STABLE_WINDOWS", 2))
+            ),
             CONFIRM_WAIT = math.max(0.25, numberSetting("GPINATA_CONFIRM_WAIT", 1.5)),
             RETRY_DELAY = math.max(0.25, numberSetting("GPINATA_RETRY_DELAY", 1)),
             -- More than one fast retry amplified rejection bursts in testing.
@@ -71,9 +105,23 @@ task.spawn(function()
             RETRY_DISABLE_AFTER = 1,
             REJECTION_BACKOFF_BASE = 2,
             REJECTION_BACKOFF_MAX = 30,
+            REMOTE_TIMEOUT = math.max(
+                3,
+                numberSetting("GPINATA_REMOTE_TIMEOUT", 8)
+            ),
             REMOTE_ERROR_RESTART_AFTER = 5,
             VERBOSE = env.GPINATA_VERBOSE == true,
         }
+
+        SETTINGS.ADAPTIVE_MAX_INTERVAL = math.max(
+            SETTINGS.ADAPTIVE_MIN_INTERVAL,
+            SETTINGS.ADAPTIVE_MAX_INTERVAL
+        )
+
+        local currentInterval = math.max(
+            SETTINGS.ADAPTIVE_MIN_INTERVAL,
+            math.min(SETTINGS.ADAPTIVE_MAX_INTERVAL, SETTINGS.INTERVAL)
+        )
 
         local function applyFpsCap()
             if type(setfpscap) ~= "function" then
@@ -134,6 +182,62 @@ task.spawn(function()
             end
 
             return ConsumeRemote
+        end
+
+        local function invokeConsumeWithTimeout(remote, uid)
+            local completed = false
+            local callOk = false
+            local callResult = nil
+
+            local invokeThread = task.spawn(function()
+                local ok, result = pcall(function()
+                    return remote:InvokeServer(uid)
+                end)
+
+                callOk = ok
+                callResult = result
+                completed = true
+            end)
+
+            local deadline = os.clock() + SETTINGS.REMOTE_TIMEOUT
+
+            while not completed
+                and not env.STOP_MINI_PINATA_FAST_PLACER
+                and os.clock() < deadline
+            do
+                task.wait(0.1)
+            end
+
+            if completed then
+                return callOk, callResult, false
+            end
+
+            local cancelled = false
+
+            if type(task.cancel) == "function" then
+                cancelled = pcall(task.cancel, invokeThread)
+            end
+
+            if not cancelled and type(coroutine.close) == "function" then
+                cancelled = pcall(coroutine.close, invokeThread)
+            end
+
+            if not cancelled and completed then
+                return callOk, callResult, false
+            end
+
+            if not cancelled then
+                error("[Runtime] Timed-out remote thread could not be cancelled.")
+            end
+
+            if env.STOP_MINI_PINATA_FAST_PLACER then
+                return false, "engine stopped during remote call", false
+            end
+
+            return false, string.format(
+                "remote timed out after %.1fs",
+                SETTINGS.REMOTE_TIMEOUT
+            ), true
         end
 
         local function getMapCmds()
@@ -243,9 +347,9 @@ task.spawn(function()
             end
 
             local userId = LocalPlayer and tonumber(LocalPlayer.UserId) or 0
-            local phase = ((userId or 0) % 1009) / 1009 * SETTINGS.INTERVAL
-            local currentPhase = serverNow % SETTINGS.INTERVAL
-            local delay = (phase - currentPhase + SETTINGS.INTERVAL) % SETTINGS.INTERVAL
+            local phase = ((userId or 0) % 1009) / 1009 * currentInterval
+            local currentPhase = serverNow % currentInterval
+            local delay = (phase - currentPhase + currentInterval) % currentInterval
 
             if delay < 0.05 then
                 return true
@@ -416,12 +520,24 @@ task.spawn(function()
             return "stopped"
         end
 
-        print(string.format(
-            "[Runtime] Started | interval %.2fs | retry %.2fs | amount %d",
-            SETTINGS.INTERVAL,
-            SETTINGS.RETRY_DELAY,
-            initialTotal
-        ))
+        if SETTINGS.ADAPTIVE then
+            print(string.format(
+                "[Runtime] Started | target %.2fs | adaptive %.2f-%.2fs "
+                    .. "| retry %.2fs | amount %d",
+                currentInterval,
+                SETTINGS.ADAPTIVE_MIN_INTERVAL,
+                SETTINGS.ADAPTIVE_MAX_INTERVAL,
+                SETTINGS.RETRY_DELAY,
+                initialTotal
+            ))
+        else
+            print(string.format(
+                "[Runtime] Started | interval %.2fs | retry %.2fs | amount %d",
+                currentInterval,
+                SETTINGS.RETRY_DELAY,
+                initialTotal
+            ))
+        end
 
         local placementRunStartedAt = os.clock()
         local cycles = 0
@@ -430,7 +546,9 @@ task.spawn(function()
         local retries = 0
         local rejected = 0
         local rejectedStreak = 0
+        local failedCycles = 0
         local errors = 0
+        local timeouts = 0
         local consecutiveRemoteErrors = 0
         local inventoryUnavailableSince = nil
         local lastResponse = nil
@@ -450,7 +568,7 @@ task.spawn(function()
         end
 
         local function printStatus()
-            if remoteCalls % SETTINGS.STATUS_EVERY ~= 0 then
+            if cycles == 0 or cycles % SETTINGS.STATUS_EVERY ~= 0 then
                 return
             end
 
@@ -460,15 +578,20 @@ task.spawn(function()
 
             print(string.format(
                 "[Runtime] Status | cycles %d | confirmed %d | calls %d "
-                    .. "| retries %d | rejected %d | reject streak %d "
-                    .. "| errors %d | %.1f/hour | %.0f/day | response %s",
+                    .. "| retries %d | rejected %d | failed %d "
+                    .. "| reject streak %d | errors %d | timeouts %d "
+                    .. "| interval %.2fs "
+                    .. "| %.1f/hour | %.0f/day | response %s",
                 cycles,
                 confirmed,
                 remoteCalls,
                 retries,
                 rejected,
+                failedCycles,
                 rejectedStreak,
                 errors,
+                timeouts,
+                currentInterval,
                 acceptedPerHour,
                 projectedPerDay,
                 tostring(lastResponse)
@@ -487,6 +610,90 @@ task.spawn(function()
             )
         end
 
+        local adaptiveWindowCycles = 0
+        local adaptiveWindowRejected = 0
+        local adaptiveWindowFailed = 0
+        local adaptiveStableWindows = 0
+
+        local function updateAdaptiveRate(cycleConfirmed, cycleRejected)
+            if not SETTINGS.ADAPTIVE then
+                return
+            end
+
+            adaptiveWindowCycles += 1
+
+            if cycleRejected then
+                adaptiveWindowRejected += 1
+            end
+
+            if not cycleConfirmed then
+                adaptiveWindowFailed += 1
+            end
+
+            if adaptiveWindowCycles < SETTINGS.ADAPTIVE_WINDOW then
+                return
+            end
+
+            local previousInterval = currentInterval
+            local rejectRate = adaptiveWindowRejected / adaptiveWindowCycles
+            local adjustmentReason = nil
+
+            if adaptiveWindowFailed > 0 then
+                currentInterval = math.min(
+                    SETTINGS.ADAPTIVE_MAX_INTERVAL,
+                    currentInterval + SETTINGS.ADAPTIVE_STEP_UP * 2
+                )
+                adaptiveStableWindows = 0
+                adjustmentReason = "failed cycle"
+            elseif rejectRate >= SETTINGS.ADAPTIVE_HIGH_REJECT_RATE then
+                currentInterval = math.min(
+                    SETTINGS.ADAPTIVE_MAX_INTERVAL,
+                    currentInterval + SETTINGS.ADAPTIVE_STEP_UP
+                )
+                adaptiveStableWindows = 0
+                adjustmentReason = "high rejection pressure"
+            elseif rejectRate > SETTINGS.ADAPTIVE_LOW_REJECT_RATE then
+                currentInterval = math.min(
+                    SETTINGS.ADAPTIVE_MAX_INTERVAL,
+                    currentInterval + SETTINGS.ADAPTIVE_STEP_UP / 2
+                )
+                adaptiveStableWindows = 0
+                adjustmentReason = "light rejection pressure"
+            elseif adaptiveWindowRejected == 0 then
+                adaptiveStableWindows += 1
+
+                if adaptiveStableWindows >= SETTINGS.ADAPTIVE_STABLE_WINDOWS then
+                    currentInterval = math.max(
+                        SETTINGS.ADAPTIVE_MIN_INTERVAL,
+                        currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN
+                    )
+                    adaptiveStableWindows = 0
+                    adjustmentReason = "stable recovery"
+                end
+            else
+                -- One recovered rejection in a 20-cycle window is normal
+                -- jitter. Hold the current rate instead of chasing noise.
+                adaptiveStableWindows = 0
+            end
+
+            if math.abs(currentInterval - previousInterval) >= 0.001 then
+                print(string.format(
+                    "[Runtime] Adaptive | %.2fs -> %.2fs | %s "
+                        .. "| rejected %d/%d | failed %d",
+                    previousInterval,
+                    currentInterval,
+                    adjustmentReason or "window update",
+                    adaptiveWindowRejected,
+                    adaptiveWindowCycles,
+                    adaptiveWindowFailed
+                ))
+            end
+
+            adaptiveWindowCycles = 0
+            adaptiveWindowRejected = 0
+            adaptiveWindowFailed = 0
+        end
+
         while not env.STOP_MINI_PINATA_FAST_PLACER do
             if not getCharacterRoot() or not isInsideFarmArea() then
                 if not waitForFarmArea() then
@@ -501,9 +708,12 @@ task.spawn(function()
             end
 
             local cycleFinished = false
+            local cycleCounted = false
+            local cycleConfirmed = false
             local lostFarmArea = false
             local nextAttemptAt = os.clock()
             local cycleHadServerReject = false
+            local intervalAtCycleStart = currentInterval
             local cycleRetryLimit = rejectedStreak >= SETTINGS.RETRY_DISABLE_AFTER
                 and 0
                 or SETTINGS.MAX_RETRIES
@@ -549,6 +759,7 @@ task.spawn(function()
 
                 if retryIndex == 0 then
                     cycles += 1
+                    cycleCounted = true
                 else
                     retries += 1
                 end
@@ -562,11 +773,13 @@ task.spawn(function()
                     error("[Runtime] Consume remote became unavailable.")
                 end
 
-                local ok, response = pcall(function()
-                    return remote:InvokeServer(uid)
-                end)
+                local ok, response, didTimeout = invokeConsumeWithTimeout(remote, uid)
 
                 lastResponse = response
+
+                if didTimeout then
+                    timeouts += 1
+                end
 
                 local didConfirm = false
                 local amountUsed = 0
@@ -612,8 +825,9 @@ task.spawn(function()
 
                 if didConfirm then
                     recordConfirmation(amountUsed, totalAfter)
+                    cycleConfirmed = true
                     rejectedStreak = 0
-                    nextAttemptAt = attemptStartedAt + SETTINGS.INTERVAL
+                    nextAttemptAt = attemptStartedAt + currentInterval
                     cycleFinished = true
                 elseif retryIndex < cycleRetryLimit then
                     if not waitUntil(os.clock() + SETTINGS.RETRY_DELAY) then
@@ -624,8 +838,9 @@ task.spawn(function()
 
                     if lateTotal and totalBefore > 0 and lateTotal < totalBefore then
                         recordConfirmation(totalBefore - lateTotal, lateTotal)
+                        cycleConfirmed = true
                         rejectedStreak = 0
-                        nextAttemptAt = attemptStartedAt + SETTINGS.INTERVAL
+                        nextAttemptAt = attemptStartedAt + currentInterval
                         cycleFinished = true
                     end
                 else
@@ -634,12 +849,10 @@ task.spawn(function()
                     end
 
                     nextAttemptAt = attemptStartedAt
-                        + SETTINGS.INTERVAL
+                        + currentInterval
                         + getRejectionBackoff(rejectedStreak)
                     cycleFinished = true
                 end
-
-                printStatus()
 
                 if cycleFinished then
                     break
@@ -650,6 +863,20 @@ task.spawn(function()
                 break
             end
 
+            if cycleFinished and cycleCounted then
+                if not cycleConfirmed then
+                    failedCycles += 1
+                end
+
+                updateAdaptiveRate(cycleConfirmed, cycleHadServerReject)
+
+                -- Apply a controller change to the next scheduled attempt,
+                -- including a slowdown selected at the end of this cycle.
+                nextAttemptAt += currentInterval - intervalAtCycleStart
+
+                printStatus()
+            end
+
             if not lostFarmArea and cycleFinished then
                 waitUntil(nextAttemptAt)
             end
@@ -657,13 +884,17 @@ task.spawn(function()
 
         print(string.format(
             "[Runtime] Stopped | cycles %d | confirmed %d | calls %d "
-                .. "| retries %d | rejected %d | errors %d",
+                .. "| retries %d | rejected %d | failed %d | errors %d "
+                .. "| timeouts %d | interval %.2fs",
             cycles,
             confirmed,
             remoteCalls,
             retries,
             rejected,
-            errors
+            failedCycles,
+            errors,
+            timeouts,
+            currentInterval
         ))
 
         return noItemsRemain and "no_items" or "stopped"
