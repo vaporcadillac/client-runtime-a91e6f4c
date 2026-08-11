@@ -2109,6 +2109,12 @@ task.spawn(function()
                 windowNetGain = windowNetGain,
                 hourlyNetGain = hourlyNetGain,
                 dailyNetGain = dailyNetGain,
+                windowDiamondNetGain = windowNetGain,
+                hourlyDiamondNetGain = hourlyNetGain,
+                dailyDiamondNetGain = dailyNetGain,
+                ledgerWindowSeconds = ledgerWindowSeconds,
+                windowLootGained = ledgerSnapshot.windowLootGained or {},
+                dailyLootGained = ledgerSnapshot.dailyLootGained or {},
             }
 
             local encodedOk, body = pcall(HttpService.JSONEncode, HttpService, payload)
