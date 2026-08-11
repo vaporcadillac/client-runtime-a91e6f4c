@@ -12,39 +12,66 @@ end
 env.__MINI_PINATA_FAST_PLACER_RUNNING = true
 env.STOP_MINI_PINATA_FAST_PLACER = false
 
+local bootStartedAt = os.clock()
+
 task.spawn(function()
-    local success, runtimeError = xpcall(function()
-        local startedAt = os.clock()
+    if not game:IsLoaded() then
+        game.Loaded:Wait()
+    end
 
-        if not game:IsLoaded() then
-            game.Loaded:Wait()
+    task.wait(5)
+
+    local function numberSetting(name, default)
+        return tonumber(env[name]) or default
+    end
+
+    local function supervisorWait(seconds)
+        local deadline = os.clock() + seconds
+
+        while not env.STOP_MINI_PINATA_FAST_PLACER do
+            local remaining = deadline - os.clock()
+
+            if remaining <= 0 then
+                return true
+            end
+
+            task.wait(math.max(0.1, math.min(1, remaining)))
         end
 
-        task.wait(5)
+        return false
+    end
 
-        local function numberSetting(name, default)
-            return tonumber(env[name]) or default
-        end
-
+    local function runEngine()
         local SETTINGS = {
-            INTERVAL = math.max(1.5, numberSetting("GPINATA_INTERVAL", 6)),
-            CONFIRM_WAIT = math.max(0.25, numberSetting("GPINATA_CONFIRM_WAIT", 1.25)),
-            RETRY_DELAY = math.max(0.25, numberSetting("GPINATA_RETRY_DELAY", 0.75)),
-            -- More than one fast retry only amplified server-rejection bursts.
+            -- 6.2 seconds leaves a small safety margin above the observed
+            -- server boundary while retaining nearly all daily throughput.
+            INTERVAL = math.max(1.5, numberSetting("GPINATA_INTERVAL", 6.2)),
+            CONFIRM_WAIT = math.max(0.25, numberSetting("GPINATA_CONFIRM_WAIT", 1.5)),
+            RETRY_DELAY = math.max(0.25, numberSetting("GPINATA_RETRY_DELAY", 1)),
+            -- More than one fast retry amplified rejection bursts in testing.
             MAX_RETRIES = math.min(
                 1,
                 math.max(0, math.floor(numberSetting("GPINATA_MAX_RETRIES", 1)))
             ),
-            STARTUP_WAIT = math.max(0, numberSetting("GPINATA_STARTUP_WAIT", 90)),
-            STABLE_WAIT = math.max(0, numberSetting("GPINATA_STABLE_WAIT", 15)),
+            STARTUP_WAIT = math.max(0, numberSetting("GPINATA_STARTUP_WAIT", 60)),
+            STABLE_WAIT = math.max(0, numberSetting("GPINATA_STABLE_WAIT", 20)),
             FPS = math.max(1, numberSetting("GPINATA_FPS", 10)),
-            STATUS_EVERY = math.max(1, math.floor(numberSetting("GPINATA_STATUS_EVERY", 10))),
+            STATUS_EVERY = math.max(1, math.floor(numberSetting("GPINATA_STATUS_EVERY", 100))),
             TARGET_ZONE = tonumber(env.GZONE_TO) or 39,
+            FARM_WAIT_TIMEOUT = math.max(
+                60,
+                numberSetting("GPINATA_FARM_WAIT_TIMEOUT", 600)
+            ),
+            STAGGER = env.GPINATA_STAGGER ~= false,
             CONFIRM_POLL = 0.15,
             POSITION_RADIUS = 8,
             FARM_CHECK_INTERVAL = 2,
             INVENTORY_TIMEOUT = 30,
-            RETRY_DISABLE_AFTER = 2,
+            INVENTORY_RECOVERY_TIMEOUT = 60,
+            RETRY_DISABLE_AFTER = 1,
+            REJECTION_BACKOFF_BASE = 2,
+            REJECTION_BACKOFF_MAX = 30,
+            REMOTE_ERROR_RESTART_AFTER = 5,
             VERBOSE = env.GPINATA_VERBOSE == true,
         }
 
@@ -60,6 +87,20 @@ task.spawn(function()
             end
         end
 
+        local function waitUntil(deadline)
+            while not env.STOP_MINI_PINATA_FAST_PLACER do
+                local remaining = deadline - os.clock()
+
+                if remaining <= 0 then
+                    return true
+                end
+
+                task.wait(math.max(0.05, math.min(0.25, remaining)))
+            end
+
+            return false
+        end
+
         applyFpsCap()
 
         local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -67,15 +108,33 @@ task.spawn(function()
         local LocalPlayer = Players.LocalPlayer
         local Library = ReplicatedStorage:WaitForChild("Library")
         local Client = Library:WaitForChild("Client")
-        local Network = ReplicatedStorage:WaitForChild("Network")
-        local ConsumeRemote = Network:WaitForChild("MiniPinata" .. "_Consume", 30)
-
-        if not ConsumeRemote then
-            error("[Runtime] Consume remote was not found.")
-        end
-
         local Save = require(Client:WaitForChild("Save"))
         local MapCmds = nil
+        local ConsumeRemote = nil
+
+        local function getConsumeRemote()
+            if ConsumeRemote and ConsumeRemote.Parent then
+                return ConsumeRemote
+            end
+
+            local Network = ReplicatedStorage:FindFirstChild("Network")
+
+            if not Network then
+                Network = ReplicatedStorage:WaitForChild("Network", 30)
+            end
+
+            if not Network then
+                return nil
+            end
+
+            ConsumeRemote = Network:FindFirstChild("MiniPinata" .. "_Consume")
+
+            if not ConsumeRemote then
+                ConsumeRemote = Network:WaitForChild("MiniPinata" .. "_Consume", 30)
+            end
+
+            return ConsumeRemote
+        end
 
         local function getMapCmds()
             if MapCmds then
@@ -123,6 +182,7 @@ task.spawn(function()
         local function waitForFarmArea()
             local stableSince = nil
             local stablePosition = nil
+            local waitStartedAt = os.clock()
 
             print(string.format(
                 "[Runtime] Waiting for GScript farming area for target zone %d.",
@@ -130,6 +190,13 @@ task.spawn(function()
             ))
 
             while not env.STOP_MINI_PINATA_FAST_PLACER do
+                if os.clock() - waitStartedAt >= SETTINGS.FARM_WAIT_TIMEOUT then
+                    error(string.format(
+                        "[Runtime] Farming area was not ready after %.0f seconds.",
+                        SETTINGS.FARM_WAIT_TIMEOUT
+                    ))
+                end
+
                 local root = getCharacterRoot()
 
                 if root and isInsideFarmArea() then
@@ -145,7 +212,7 @@ task.spawn(function()
                     local positionReady = stableSince
                         and os.clock() - stableSince >= SETTINGS.STABLE_WAIT
 
-                    local startupReady = os.clock() - startedAt >= SETTINGS.STARTUP_WAIT
+                    local startupReady = os.clock() - bootStartedAt >= SETTINGS.STARTUP_WAIT
 
                     if positionReady and startupReady then
                         print("[Runtime] Farming area stable; placement enabled.")
@@ -160,6 +227,35 @@ task.spawn(function()
             end
 
             return false
+        end
+
+        local function waitForAccountPhase()
+            if not SETTINGS.STAGGER then
+                return true
+            end
+
+            local ok, serverNow = pcall(function()
+                return workspace:GetServerTimeNow()
+            end)
+
+            if not ok or type(serverNow) ~= "number" then
+                return true
+            end
+
+            local userId = LocalPlayer and tonumber(LocalPlayer.UserId) or 0
+            local phase = ((userId or 0) % 1009) / 1009 * SETTINGS.INTERVAL
+            local currentPhase = serverNow % SETTINGS.INTERVAL
+            local delay = (phase - currentPhase + SETTINGS.INTERVAL) % SETTINGS.INTERVAL
+
+            if delay < 0.05 then
+                return true
+            end
+
+            if SETTINGS.VERBOSE then
+                print(string.format("[Runtime] Account stagger %.2fs.", delay))
+            end
+
+            return waitUntil(os.clock() + delay)
         end
 
         local function getSaveData()
@@ -233,18 +329,23 @@ task.spawn(function()
 
         local function waitForInventory()
             local deadline = os.clock() + SETTINGS.INVENTORY_TIMEOUT
+            local sawReadyInventory = false
 
             repeat
                 local uid, total, ready = findItemStack()
 
-                if ready and uid then
-                    return uid, total
+                if ready then
+                    sawReadyInventory = true
+
+                    if uid then
+                        return uid, total, true
+                    end
                 end
 
                 task.wait(0.5)
             until os.clock() >= deadline or env.STOP_MINI_PINATA_FAST_PLACER
 
-            return nil, 0
+            return nil, 0, sawReadyInventory
         end
 
         local function getReliableTotal()
@@ -255,20 +356,6 @@ task.spawn(function()
             end
 
             return total
-        end
-
-        local function waitUntil(deadline)
-            while not env.STOP_MINI_PINATA_FAST_PLACER do
-                local remaining = deadline - os.clock()
-
-                if remaining <= 0 then
-                    return true
-                end
-
-                task.wait(math.max(0.05, math.min(0.25, remaining)))
-            end
-
-            return false
         end
 
         local function waitForConfirmation(totalBefore)
@@ -293,23 +380,41 @@ task.spawn(function()
             return false, 0, nil
         end
 
-        local initialUid, initialTotal = waitForInventory()
+        local initialUid, initialTotal, inventoryReady = waitForInventory()
 
         if not initialUid then
-            error("[Runtime] No item stack was found.")
+            if inventoryReady then
+                print("[Runtime] No Mini Pinatas were found; engine stopped cleanly.")
+                return "no_items"
+            end
+
+            error("[Runtime] Inventory did not become available.")
         end
 
         if not waitForFarmArea() then
-            return
+            return "stopped"
         end
 
-        initialUid, initialTotal = waitForInventory()
+        initialUid, initialTotal, inventoryReady = waitForInventory()
 
         if not initialUid then
-            error("[Runtime] No items remain.")
+            if inventoryReady then
+                print("[Runtime] No Mini Pinatas remain; engine stopped cleanly.")
+                return "no_items"
+            end
+
+            error("[Runtime] Inventory was unavailable after farming began.")
+        end
+
+        if not getConsumeRemote() then
+            error("[Runtime] Consume remote was not found.")
         end
 
         applyFpsCap()
+
+        if not waitForAccountPhase() then
+            return "stopped"
+        end
 
         print(string.format(
             "[Runtime] Started | interval %.2fs | retry %.2fs | amount %d",
@@ -318,6 +423,7 @@ task.spawn(function()
             initialTotal
         ))
 
+        local placementRunStartedAt = os.clock()
         local cycles = 0
         local confirmed = 0
         local remoteCalls = 0
@@ -325,6 +431,8 @@ task.spawn(function()
         local rejected = 0
         local rejectedStreak = 0
         local errors = 0
+        local consecutiveRemoteErrors = 0
+        local inventoryUnavailableSince = nil
         local lastResponse = nil
         local noItemsRemain = false
 
@@ -346,10 +454,14 @@ task.spawn(function()
                 return
             end
 
+            local elapsed = math.max(1, os.clock() - placementRunStartedAt)
+            local acceptedPerHour = confirmed / elapsed * 3600
+            local projectedPerDay = acceptedPerHour * 24
+
             print(string.format(
                 "[Runtime] Status | cycles %d | confirmed %d | calls %d "
                     .. "| retries %d | rejected %d | reject streak %d "
-                    .. "| errors %d | response %s",
+                    .. "| errors %d | %.1f/hour | %.0f/day | response %s",
                 cycles,
                 confirmed,
                 remoteCalls,
@@ -357,8 +469,22 @@ task.spawn(function()
                 rejected,
                 rejectedStreak,
                 errors,
+                acceptedPerHour,
+                projectedPerDay,
                 tostring(lastResponse)
             ))
+        end
+
+        local function getRejectionBackoff(streak)
+            if streak <= 0 then
+                return 0
+            end
+
+            local exponent = math.min(streak - 1, 4)
+            return math.min(
+                SETTINGS.REJECTION_BACKOFF_MAX,
+                SETTINGS.REJECTION_BACKOFF_BASE * (2 ^ exponent)
+            )
         end
 
         while not env.STOP_MINI_PINATA_FAST_PLACER do
@@ -368,6 +494,10 @@ task.spawn(function()
                 end
 
                 applyFpsCap()
+
+                if not waitForAccountPhase() then
+                    break
+                end
             end
 
             local cycleFinished = false
@@ -395,8 +525,18 @@ task.spawn(function()
                     uid, totalBefore, ready = findItemStack()
                 end
 
+                if ready then
+                    inventoryUnavailableSince = nil
+                elseif not inventoryUnavailableSince then
+                    inventoryUnavailableSince = os.clock()
+                elseif os.clock() - inventoryUnavailableSince
+                    >= SETTINGS.INVENTORY_RECOVERY_TIMEOUT
+                then
+                    error("[Runtime] Inventory stayed unavailable; restarting engine.")
+                end
+
                 if ready and not uid then
-                    print("[Runtime] No items remain; stopping.")
+                    print("[Runtime] No Mini Pinatas remain; stopping.")
                     noItemsRemain = true
                     break
                 end
@@ -416,8 +556,14 @@ task.spawn(function()
                 remoteCalls += 1
 
                 local attemptStartedAt = os.clock()
+                local remote = getConsumeRemote()
+
+                if not remote then
+                    error("[Runtime] Consume remote became unavailable.")
+                end
+
                 local ok, response = pcall(function()
-                    return ConsumeRemote:InvokeServer(uid)
+                    return remote:InvokeServer(uid)
                 end)
 
                 lastResponse = response
@@ -425,6 +571,10 @@ task.spawn(function()
                 local didConfirm = false
                 local amountUsed = 0
                 local totalAfter = nil
+
+                if ok then
+                    consecutiveRemoteErrors = 0
+                end
 
                 if ok and response == true then
                     -- The server explicitly accepted the placement. Inventory
@@ -440,17 +590,24 @@ task.spawn(function()
                         totalAfter = math.max(0, totalBefore - 1)
                     end
                 elseif ok and response ~= false then
-                    -- Fall back to inventory confirmation only when the remote
-                    -- does not return an explicit success/failure boolean.
+                    -- Use inventory confirmation only when the remote does not
+                    -- return an explicit success/failure boolean.
                     didConfirm, amountUsed, totalAfter = waitForConfirmation(totalBefore)
                 elseif ok and response == false then
-                    -- A false response is an explicit server rejection, not a
-                    -- delayed inventory confirmation or a Lua/network error.
                     rejected += 1
                     cycleHadServerReject = true
-                elseif not ok then
+                else
                     errors += 1
-                    warn("[Runtime] Remote failed: " .. tostring(response))
+                    consecutiveRemoteErrors += 1
+                    ConsumeRemote = nil
+
+                    if errors == 1 or errors % 10 == 0 then
+                        warn("[Runtime] Remote failed: " .. tostring(response))
+                    end
+
+                    if consecutiveRemoteErrors >= SETTINGS.REMOTE_ERROR_RESTART_AFTER then
+                        error("[Runtime] Repeated remote failures; restarting engine.")
+                    end
                 end
 
                 if didConfirm then
@@ -476,7 +633,9 @@ task.spawn(function()
                         rejectedStreak += 1
                     end
 
-                    nextAttemptAt = attemptStartedAt + SETTINGS.INTERVAL
+                    nextAttemptAt = attemptStartedAt
+                        + SETTINGS.INTERVAL
+                        + getRejectionBackoff(rejectedStreak)
                     cycleFinished = true
                 end
 
@@ -506,13 +665,37 @@ task.spawn(function()
             rejected,
             errors
         ))
-    end, function(err)
-        return tostring(err)
-    end)
+
+        return noItemsRemain and "no_items" or "stopped"
+    end
+
+    local restartDelay = math.max(5, numberSetting("GPINATA_RESTART_DELAY", 15))
+    local restartDelayMax = math.max(
+        restartDelay,
+        numberSetting("GPINATA_RESTART_DELAY_MAX", 300)
+    )
+
+    while not env.STOP_MINI_PINATA_FAST_PLACER do
+        local success, result = xpcall(runEngine, function(err)
+            return tostring(err)
+        end)
+
+        if success then
+            break
+        end
+
+        warn(string.format(
+            "[Runtime] Engine fault: %s | retrying in %.0fs",
+            tostring(result),
+            restartDelay
+        ))
+
+        if not supervisorWait(restartDelay) then
+            break
+        end
+
+        restartDelay = math.min(restartDelay * 2, restartDelayMax)
+    end
 
     env.__MINI_PINATA_FAST_PLACER_RUNNING = false
-
-    if not success then
-        warn("[Runtime] Engine stopped with error: " .. tostring(runtimeError))
-    end
 end)
