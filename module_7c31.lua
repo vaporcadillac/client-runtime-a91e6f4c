@@ -1831,6 +1831,10 @@ task.spawn(function()
         )
         local telemetryLastConfirmationAt = 0
         local telemetryPublisherRunning = false
+        local telemetryPinataCostPerUnit = math.max(
+            0,
+            numberSetting("GPINATA_COST_PER_UNIT", 50000)
+        )
 
         local reportSnapshot = {
             cycles = 0,
@@ -2067,18 +2071,27 @@ task.spawn(function()
             local ledgerSnapshot = type(env.GLEDGER_LIVE_SNAPSHOT) == "table"
                 and env.GLEDGER_LIVE_SNAPSHOT
                 or {}
-            local windowNetGain = math.max(
-                0,
-                tonumber(ledgerSnapshot.windowNetGain) or 0
+            local directWindowNetGain = tonumber(ledgerSnapshot.windowNetGain) or 0
+            local directHourlyNetGain = tonumber(ledgerSnapshot.hourlyNetGain) or 0
+            local directDailyNetGain = tonumber(ledgerSnapshot.dailyNetGain) or 0
+            local ledgerWindowSeconds = math.max(
+                1,
+                tonumber(ledgerSnapshot.windowSeconds) or elapsed
             )
-            local hourlyNetGain = math.max(
+            local windowPinatasConsumed = math.max(
                 0,
-                tonumber(ledgerSnapshot.hourlyNetGain) or 0
+                math.floor(tonumber(ledgerSnapshot.windowPinatasConsumed) or 0)
             )
-            local dailyNetGain = math.max(
+            local dailyPinatasConsumed = math.max(
                 0,
-                tonumber(ledgerSnapshot.dailyNetGain) or 0
+                math.floor(tonumber(ledgerSnapshot.dailyPinatasConsumed) or 0)
             )
+            local windowPinataCost = windowPinatasConsumed * telemetryPinataCostPerUnit
+            local dailyPinataCost = dailyPinatasConsumed * telemetryPinataCostPerUnit
+            local windowNetGain = directWindowNetGain - windowPinataCost
+            local hourlyNetGain = directHourlyNetGain
+                - windowPinataCost / ledgerWindowSeconds * 3600
+            local dailyNetGain = directDailyNetGain - dailyPinataCost
             local payload = {
                 accountName = LocalPlayer and LocalPlayer.Name or "unknown",
                 robloxUserId = tostring(LocalPlayer and LocalPlayer.UserId or 0),
