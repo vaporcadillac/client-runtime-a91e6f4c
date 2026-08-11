@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "calibrated-autoremote-12"
+local ENGINE_BUILD = "calibrated-autoremote-13"
 
 if env.GPINATA_ENABLED == false then
     return
@@ -270,21 +270,13 @@ task.spawn(function()
         }
     end
 
-    local function webhookContextFields(targetZone)
+    local function webhookContextFields()
         local accountName = WebhookPlayer and WebhookPlayer.Name or "Unknown"
         local userId = WebhookPlayer and WebhookPlayer.UserId or "Unknown"
-        local jobId = game.JobId ~= "" and game.JobId or "Unknown"
 
         return {
             webhookField("Account", accountName .. " (`" .. tostring(userId) .. "`)", true),
-            webhookField("Configured Area", targetZone or env.GZONE_TO or "Unknown", true),
-            webhookField("Client Uptime", formatDuration(os.clock() - bootStartedAt), true),
-            webhookField(
-                "Game Build",
-                tostring(game.PlaceId) .. " • v" .. tostring(game.PlaceVersion),
-                true
-            ),
-            webhookField("Server Job ID", jobId, false),
+            webhookField("Runtime", formatDuration(os.clock() - bootStartedAt), true),
         }
     end
 
@@ -2767,7 +2759,6 @@ task.spawn(function()
             color = noItemsRemain and 16753920 or 9807270,
             targetZone = SETTINGS.TARGET_ZONE,
             fields = {
-                webhookField("Run Uptime", formatDuration(finalElapsed), true),
                 webhookField("Placement Cycles", formatInteger(cycles), true),
                 webhookField("Confirmed Placements", formatInteger(confirmed), true),
                 webhookField("Cycle Success Rate", string.format("%.2f%%", finalSuccessRate), true),
