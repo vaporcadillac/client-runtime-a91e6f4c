@@ -662,7 +662,7 @@ task.spawn(function()
             STATUS_EVERY = math.max(1, math.floor(numberSetting("GPINATA_STATUS_EVERY", 100))),
             WEBHOOK_STATUS_SECONDS = math.max(
                 300,
-                numberSetting("GPINATA_WEBHOOK_STATUS_SECONDS", 35 * 60)
+                numberSetting("GPINATA_WEBHOOK_STATUS_SECONDS", 60 * 60)
             ),
             WEBHOOK_FARM_LOSS_DELAY = math.max(
                 30,
@@ -2051,6 +2051,17 @@ task.spawn(function()
         local function publishTelemetry()
             if not telemetryRequest or not telemetryEndpoint or not telemetryWriteKey then
                 return
+            end
+
+            -- A placement confirmation updates this cache, but another runtime
+            -- action can change inventory between confirmations. Refresh the
+            -- read-only supply figure immediately before publishing so Discord
+            -- reports the currently observed Mini Pinata count.
+            local currentTotal = getReliableTotal()
+
+            if currentTotal ~= nil then
+                lastKnownTotal = currentTotal
+                dashboard.pinatas = currentTotal
             end
 
             local elapsed = math.max(1, os.clock() - placementRunStartedAt)
