@@ -1,5 +1,5 @@
 local env = getgenv()
-local LEDGER_BUILD = "fleet-ledger-1.2"
+local LEDGER_BUILD = "fleet-ledger-1.3"
 
 if env.GLEDGER_ENABLED == false then
     return
@@ -33,12 +33,12 @@ task.spawn(function()
 
     local SETTINGS = {
         SAMPLE_SECONDS = math.max(
-            5,
-            numberSetting("GLEDGER_SAMPLE_SECONDS", 15)
+            1,
+            numberSetting("GLEDGER_SAMPLE_SECONDS", 2)
         ),
         REPORT_SECONDS = math.max(
             300,
-            numberSetting("GLEDGER_REPORT_SECONDS", 35 * 60)
+            numberSetting("GLEDGER_REPORT_SECONDS", 60 * 60)
         ),
         REPORT_STAGGER_MAX = math.max(
             0,
@@ -70,7 +70,7 @@ task.spawn(function()
     local DEFAULT_ITEMS = {
         "Mini Pinata",
         "Charm Stone",
-        "Cocktail",
+        "The Cocktail",
         "Seed Bag",
         "Diamond Seed Bag",
         "Hasty Flag",
@@ -89,6 +89,11 @@ task.spawn(function()
             and string.lower(value):gsub("[^%w]", "")
             or ""
     end
+
+    local ITEM_ALIASES = {
+        [normalize("Cocktail")] = normalize("The Cocktail"),
+        [normalize("The Cocktail")] = normalize("The Cocktail"),
+    }
 
     local trackedItems = {}
     local trackedOrder = {}
@@ -515,6 +520,7 @@ task.spawn(function()
 
     local function addTrackedAmount(totals, candidateName, value)
         local key = normalize(candidateName)
+        key = ITEM_ALIASES[key] or key
 
         if trackedItems[key] == nil then
             return
@@ -619,6 +625,10 @@ task.spawn(function()
     end
 
     local profileFileName = string.format(
+        "gem_ledger_%s.json",
+        tostring(LocalPlayer and LocalPlayer.UserId or 0)
+    )
+    local legacyProfileFileName = string.format(
         "gem_ledger_%s_%s.json",
         tostring(LocalPlayer and LocalPlayer.UserId or 0),
         tostring(game.PlaceId)
@@ -641,12 +651,33 @@ task.spawn(function()
         lastSeenAt = 0,
     }
 
+    local function canonicalizeAmounts(amounts)
+        local result = {}
+
+        for key, amount in pairs(type(amounts) == "table" and amounts or {}) do
+            local canonical = ITEM_ALIASES[normalize(key)] or normalize(key)
+
+            if trackedItems[canonical] ~= nil then
+                result[canonical] = math.max(
+                    tonumber(result[canonical]) or 0,
+                    tonumber(amount) or 0
+                )
+            end
+        end
+
+        return result
+    end
+
     local function loadProfile()
         if not persistenceEnabled then
             return
         end
 
         local readOk, encoded = pcall(readFile, profileFileName)
+
+        if not readOk or type(encoded) ~= "string" or encoded == "" then
+            readOk, encoded = pcall(readFile, legacyProfileFileName)
+        end
 
         if not readOk or type(encoded) ~= "string" or encoded == "" then
             return
@@ -672,20 +703,14 @@ task.spawn(function()
         profile = decoded
         profile.schema = 2
         profile.sessions = math.max(0, tonumber(profile.sessions) or 0) + 1
-        profile.dayStartItems = type(profile.dayStartItems) == "table"
-            and profile.dayStartItems
-            or {}
+        profile.dayStartItems = canonicalizeAmounts(profile.dayStartItems)
         profile.dayDiamondGain = math.max(0, tonumber(profile.dayDiamondGain) or 0)
         profile.dayPinatasConsumed = math.max(
             0,
             math.floor(tonumber(profile.dayPinatasConsumed) or 0)
         )
-        profile.dayLootGained = type(profile.dayLootGained) == "table"
-            and profile.dayLootGained
-            or {}
-        profile.lastItems = type(profile.lastItems) == "table"
-            and profile.lastItems
-            or {}
+        profile.dayLootGained = canonicalizeAmounts(profile.dayLootGained)
+        profile.lastItems = canonicalizeAmounts(profile.lastItems)
 
         if profile.day ~= today then
             profile.day = today
@@ -720,6 +745,9 @@ task.spawn(function()
     end
 
     loadProfile()
+
+    local ledgerSessionId = HttpService:GenerateGUID(false)
+    local ledgerSessionStartedAt = os.time()
 
     local initialData = nil
     local initialGems = nil
@@ -841,24 +869,11 @@ task.spawn(function()
         local gemsPerHour = gemDelta / elapsed * 3600
         local projectedDay = gemsPerHour * 24
         local dayDelta = profile.dayDiamondGain
-        local knownFarmSamples = math.max(0, totalSamples - unknownFarmSamples)
-        local farmUptime = knownFarmSamples > 0
-            and farmSamples / knownFarmSamples * 100
-            or nil
-        local farmUptimeValue = farmUptime or 0
-        local farmUptimeText = farmUptime
-            and string.format("%.2f%%", farmUptime)
-            or "Unavailable"
         local miniKey = normalize("Mini Pinata")
         local pinatasUsed = windowPinatasConsumed
         local valuePerPinata = pinatasUsed > 0 and gemDelta / pinatasUsed or nil
-        local status = farmUptime == nil and "Farm detector unavailable"
-            or farmUptime >= 95 and "Excellent"
-            or farmUptime >= 85 and "Degraded"
-            or "Needs attention"
-        local reportPing = readPing()
         local description = string.format(
-            "💎 **%s net gem movement** in %s\n⚡ **%s/hour** • projected balance movement **%s/day**\n🪅 **%s piñatas used** • %s\n🟢 Farming uptime: **%s** — %s",
+            "💎 **%s net gem movement** in %s\n⚡ **%s/hour** • projected balance movement **%s/day**\n🪅 **%s piñatas used** • %s",
             formatSignedCompact(gemDelta),
             formatDuration(elapsed),
             formatCompact(gemsPerHour),
@@ -868,9 +883,7 @@ task.spawn(function()
                 "direct balance "
                     .. formatCompact(valuePerPinata)
                     .. " gems/piñata"
-            ) or "direct balance/piñata pending",
-            farmUptimeText,
-            status
+            ) or "direct balance/piñata pending"
         )
         local fields = {
             webhookField(
@@ -886,40 +899,12 @@ task.spawn(function()
                 false
             ),
             webhookField(
-                "📦 Tracked Inventory — Window",
-                itemDeltaLines(reportStartItems, currentItems, true),
-                false
-            ),
-            webhookField(
                 "🪅 Piñata Consumption",
                 string.format(
                     "Consumed: **%s**\nDirect gem-balance movement per consumed piñata: **%s**\nRemaining: **%s**",
                     formatInteger(pinatasUsed),
                     valuePerPinata and formatCompact(valuePerPinata) or "N/A",
                     formatInteger(currentItems[miniKey] or 0)
-                ),
-                true
-            ),
-            webhookField(
-                "🖥️ Client Health",
-                string.format(
-                    "FPS: **%.1f** • Window minimum: **%s**\nPing: **%s ms** • Window maximum: **%s ms**\nSamples: %s • Unknown farm samples: %s",
-                    measuredFps,
-                    minimumFps and string.format("%.1f", minimumFps) or "N/A",
-                    reportPing and string.format("%.0f", reportPing) or "N/A",
-                    maximumPing and string.format("%.0f", maximumPing) or "N/A",
-                    formatInteger(totalSamples),
-                    formatInteger(unknownFarmSamples)
-                ),
-                false
-            ),
-            webhookField(
-                "🧭 Farming",
-                string.format(
-                    "Farming samples: **%s/%s**\nObserved uptime: **%s**",
-                    formatInteger(farmSamples),
-                    formatInteger(totalSamples),
-                    farmUptimeText
                 ),
                 true
             ),
@@ -936,13 +921,10 @@ task.spawn(function()
         }
 
         enqueueWebhook(
-            "Fleet Profit Ledger • 35-Minute Report",
+            "Fleet Profit Ledger • Hourly Report",
             description,
             fields,
-            farmUptime == nil and 3447003
-                or farmUptimeValue >= 95 and 5763719
-                or farmUptimeValue >= 85 and 16753920
-                or 15548997
+            3447003
         )
 
         reportStartedAt = now
@@ -999,9 +981,11 @@ task.spawn(function()
 
             currentItems = scanTrackedItems(data)
 
+            local profileChanged = false
             local gemGain = math.max(0, currentGems - previousGems)
             windowDiamondGain += gemGain
             profile.dayDiamondGain += gemGain
+            profileChanged = gemGain > 0
 
             local miniPinataKey = normalize("Mini Pinata")
 
@@ -1013,10 +997,19 @@ task.spawn(function()
                     local consumed = -delta
                     windowPinatasConsumed += consumed
                     profile.dayPinatasConsumed += consumed
+                    profileChanged = true
                 elseif key ~= miniPinataKey and delta > 0 then
                     addPositiveAmount(windowLootGained, key, delta)
                     addPositiveAmount(profile.dayLootGained, key, delta)
+                    profileChanged = true
                 end
+            end
+
+            if profileChanged then
+                profile.lastGems = currentGems
+                profile.lastItems = table.clone(currentItems)
+                saveProfile()
+                lastCheckpointAt = os.clock()
             end
         end
 
@@ -1049,6 +1042,9 @@ task.spawn(function()
 
         env.GLEDGER_LIVE_SNAPSHOT = {
             build = LEDGER_BUILD,
+            ledgerDay = profile.day,
+            ledgerSessionId = ledgerSessionId,
+            ledgerSessionStartedAt = ledgerSessionStartedAt,
             profitBasis = "earned_diamonds_plus_rap_loot_pending",
             windowNetGain = liveWindowNetGain,
             hourlyNetGain = liveHourlyNetGain,
