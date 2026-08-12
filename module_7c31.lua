@@ -2053,6 +2053,17 @@ task.spawn(function()
                 return
             end
 
+            -- A placement confirmation updates this cache, but another runtime
+            -- action can change inventory between confirmations. Refresh the
+            -- read-only supply figure immediately before publishing so Discord
+            -- reports the currently observed Mini Pinata count.
+            local currentTotal = getReliableTotal()
+
+            if currentTotal ~= nil then
+                lastKnownTotal = currentTotal
+                dashboard.pinatas = currentTotal
+            end
+
             local elapsed = math.max(1, os.clock() - placementRunStartedAt)
             local observedPerMinute = confirmed / elapsed * 60
             local currentCircuitDowntime = circuitDowntimeTotal
