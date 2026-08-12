@@ -2106,6 +2106,9 @@ task.spawn(function()
             local payload = {
                 accountName = LocalPlayer and LocalPlayer.Name or "unknown",
                 robloxUserId = tostring(LocalPlayer and LocalPlayer.UserId or 0),
+                ledgerDay = ledgerSnapshot.ledgerDay,
+                ledgerSessionId = ledgerSnapshot.ledgerSessionId,
+                ledgerSessionStartedAt = ledgerSnapshot.ledgerSessionStartedAt,
                 status = telemetryStatus(),
                 placementRatePerMinute = observedPerMinute,
                 confirmed = confirmed,
