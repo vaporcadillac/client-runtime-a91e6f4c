@@ -662,7 +662,7 @@ task.spawn(function()
             STATUS_EVERY = math.max(1, math.floor(numberSetting("GPINATA_STATUS_EVERY", 100))),
             WEBHOOK_STATUS_SECONDS = math.max(
                 300,
-                numberSetting("GPINATA_WEBHOOK_STATUS_SECONDS", 35 * 60)
+                numberSetting("GPINATA_WEBHOOK_STATUS_SECONDS", 60 * 60)
             ),
             WEBHOOK_FARM_LOSS_DELAY = math.max(
                 30,
