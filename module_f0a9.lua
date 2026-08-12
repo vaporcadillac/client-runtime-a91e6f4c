@@ -624,7 +624,7 @@ task.spawn(function()
         tostring(game.PlaceId)
     )
     local persistenceEnabled = readFile ~= nil and writeFile ~= nil
-    local today = os.date("!%Y-%m-%d")
+    local today = os.date("%Y-%m-%d")
     local profile = {
         schema = 2,
         userId = LocalPlayer and LocalPlayer.UserId or 0,
@@ -876,7 +876,7 @@ task.spawn(function()
             webhookField(
                 "💎 Gem Position",
                 string.format(
-                    "Current: **%s** (`%s`)\nWindow: **%s**\nUTC-day net: **%s**\nWindow pace: **%s/hour**",
+                    "Current: **%s** (`%s`)\nWindow: **%s**\nLocal-day net: **%s**\nWindow pace: **%s/hour**",
                     formatCompact(currentGems),
                     formatInteger(currentGems),
                     formatSignedCompact(gemDelta),
@@ -926,7 +926,7 @@ task.spawn(function()
             webhookField(
                 "💾 Continuity",
                 string.format(
-                    "UTC day: **%s**\nSessions today: **%s**\nPersistent checkpoint: **%s**",
+                    "Local day: **%s**\nSessions today: **%s**\nPersistent checkpoint: **%s**",
                     tostring(profile.day),
                     formatInteger(profile.sessions),
                     persistenceEnabled and "available" or "session only"
@@ -960,7 +960,7 @@ task.spawn(function()
     end
 
     local function rollUtcDayIfNeeded()
-        local currentDay = os.date("!%Y-%m-%d")
+        local currentDay = os.date("%Y-%m-%d")
 
         if profile.day == currentDay then
             return
