@@ -1,5 +1,5 @@
 local env = getgenv()
-local LEDGER_BUILD = "fleet-ledger-1.2"
+local LEDGER_BUILD = "fleet-ledger-1.3"
 
 if env.GLEDGER_ENABLED == false then
     return
@@ -33,8 +33,8 @@ task.spawn(function()
 
     local SETTINGS = {
         SAMPLE_SECONDS = math.max(
-            5,
-            numberSetting("GLEDGER_SAMPLE_SECONDS", 15)
+            1,
+            numberSetting("GLEDGER_SAMPLE_SECONDS", 2)
         ),
         REPORT_SECONDS = math.max(
             300,
@@ -70,7 +70,7 @@ task.spawn(function()
     local DEFAULT_ITEMS = {
         "Mini Pinata",
         "Charm Stone",
-        "Cocktail",
+        "The Cocktail",
         "Seed Bag",
         "Diamond Seed Bag",
         "Hasty Flag",
@@ -89,6 +89,11 @@ task.spawn(function()
             and string.lower(value):gsub("[^%w]", "")
             or ""
     end
+
+    local ITEM_ALIASES = {
+        [normalize("Cocktail")] = normalize("The Cocktail"),
+        [normalize("The Cocktail")] = normalize("The Cocktail"),
+    }
 
     local trackedItems = {}
     local trackedOrder = {}
@@ -515,6 +520,7 @@ task.spawn(function()
 
     local function addTrackedAmount(totals, candidateName, value)
         local key = normalize(candidateName)
+        key = ITEM_ALIASES[key] or key
 
         if trackedItems[key] == nil then
             return
@@ -619,6 +625,10 @@ task.spawn(function()
     end
 
     local profileFileName = string.format(
+        "gem_ledger_%s.json",
+        tostring(LocalPlayer and LocalPlayer.UserId or 0)
+    )
+    local legacyProfileFileName = string.format(
         "gem_ledger_%s_%s.json",
         tostring(LocalPlayer and LocalPlayer.UserId or 0),
         tostring(game.PlaceId)
@@ -641,12 +651,33 @@ task.spawn(function()
         lastSeenAt = 0,
     }
 
+    local function canonicalizeAmounts(amounts)
+        local result = {}
+
+        for key, amount in pairs(type(amounts) == "table" and amounts or {}) do
+            local canonical = ITEM_ALIASES[normalize(key)] or normalize(key)
+
+            if trackedItems[canonical] ~= nil then
+                result[canonical] = math.max(
+                    tonumber(result[canonical]) or 0,
+                    tonumber(amount) or 0
+                )
+            end
+        end
+
+        return result
+    end
+
     local function loadProfile()
         if not persistenceEnabled then
             return
         end
 
         local readOk, encoded = pcall(readFile, profileFileName)
+
+        if not readOk or type(encoded) ~= "string" or encoded == "" then
+            readOk, encoded = pcall(readFile, legacyProfileFileName)
+        end
 
         if not readOk or type(encoded) ~= "string" or encoded == "" then
             return
@@ -672,20 +703,14 @@ task.spawn(function()
         profile = decoded
         profile.schema = 2
         profile.sessions = math.max(0, tonumber(profile.sessions) or 0) + 1
-        profile.dayStartItems = type(profile.dayStartItems) == "table"
-            and profile.dayStartItems
-            or {}
+        profile.dayStartItems = canonicalizeAmounts(profile.dayStartItems)
         profile.dayDiamondGain = math.max(0, tonumber(profile.dayDiamondGain) or 0)
         profile.dayPinatasConsumed = math.max(
             0,
             math.floor(tonumber(profile.dayPinatasConsumed) or 0)
         )
-        profile.dayLootGained = type(profile.dayLootGained) == "table"
-            and profile.dayLootGained
-            or {}
-        profile.lastItems = type(profile.lastItems) == "table"
-            and profile.lastItems
-            or {}
+        profile.dayLootGained = canonicalizeAmounts(profile.dayLootGained)
+        profile.lastItems = canonicalizeAmounts(profile.lastItems)
 
         if profile.day ~= today then
             profile.day = today
@@ -720,6 +745,9 @@ task.spawn(function()
     end
 
     loadProfile()
+
+    local ledgerSessionId = HttpService:GenerateGUID(false)
+    local ledgerSessionStartedAt = os.time()
 
     local initialData = nil
     local initialGems = nil
@@ -999,9 +1027,11 @@ task.spawn(function()
 
             currentItems = scanTrackedItems(data)
 
+            local profileChanged = false
             local gemGain = math.max(0, currentGems - previousGems)
             windowDiamondGain += gemGain
             profile.dayDiamondGain += gemGain
+            profileChanged = gemGain > 0
 
             local miniPinataKey = normalize("Mini Pinata")
 
@@ -1013,10 +1043,19 @@ task.spawn(function()
                     local consumed = -delta
                     windowPinatasConsumed += consumed
                     profile.dayPinatasConsumed += consumed
+                    profileChanged = true
                 elseif key ~= miniPinataKey and delta > 0 then
                     addPositiveAmount(windowLootGained, key, delta)
                     addPositiveAmount(profile.dayLootGained, key, delta)
+                    profileChanged = true
                 end
+            end
+
+            if profileChanged then
+                profile.lastGems = currentGems
+                profile.lastItems = table.clone(currentItems)
+                saveProfile()
+                lastCheckpointAt = os.clock()
             end
         end
 
@@ -1049,6 +1088,9 @@ task.spawn(function()
 
         env.GLEDGER_LIVE_SNAPSHOT = {
             build = LEDGER_BUILD,
+            ledgerDay = profile.day,
+            ledgerSessionId = ledgerSessionId,
+            ledgerSessionStartedAt = ledgerSessionStartedAt,
             profitBasis = "earned_diamonds_plus_rap_loot_pending",
             windowNetGain = liveWindowNetGain,
             hourlyNetGain = liveHourlyNetGain,
