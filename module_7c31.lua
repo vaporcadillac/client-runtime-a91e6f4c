@@ -2327,7 +2327,7 @@ task.spawn(function()
                     and initialAccepted / cycles * 100
                     or 0
                 sendWebhook({
-                    title = "35-Minute Placement Update",
+                    title = "Hourly Placement Update",
                     description = "Scheduled health report. The dashboard reflects live gems, remaining piñatas, interval and observed placement speed.",
                     color = windowFailed == 0
                         and (
