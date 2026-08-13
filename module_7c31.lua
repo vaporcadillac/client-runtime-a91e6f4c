@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "calibrated-autoremote-15.1"
+local ENGINE_BUILD = "calibrated-autoremote-15.2"
 
 -- One public entrypoint starts the read-only profit ledger for every account.
 -- It remains a separately supervised thread, so download, compile, or runtime
@@ -467,6 +467,14 @@ task.spawn(function()
         end
 
         options = options or {}
+
+        -- Discord is intentionally limited to scheduled placement summaries.
+        -- Recovery, circuit-breaker, attention, and other event alerts remain
+        -- visible in runtime state/logging without producing notifications.
+        if options.periodic ~= true then
+            return
+        end
+
         local fields = {}
         appendWebhookFields(fields, webhookContextFields(options.targetZone))
         appendWebhookFields(fields, options.fields)
@@ -661,8 +669,8 @@ task.spawn(function()
             FPS = math.max(1, numberSetting("GPINATA_FPS", 10)),
             STATUS_EVERY = math.max(1, math.floor(numberSetting("GPINATA_STATUS_EVERY", 100))),
             WEBHOOK_STATUS_SECONDS = math.max(
-                300,
-                numberSetting("GPINATA_WEBHOOK_STATUS_SECONDS", 60 * 60)
+                3 * 60 * 60,
+                numberSetting("GPINATA_WEBHOOK_STATUS_SECONDS", 3 * 60 * 60)
             ),
             WEBHOOK_FARM_LOSS_DELAY = math.max(
                 30,
@@ -2327,8 +2335,9 @@ task.spawn(function()
                     and initialAccepted / cycles * 100
                     or 0
                 sendWebhook({
-                    title = "Hourly Placement Update",
-                    description = "Scheduled health report. The dashboard reflects live gems, remaining piñatas, interval and observed placement speed.",
+                    periodic = true,
+                    title = "3-Hour Placement Update",
+                    description = "Scheduled three-hour report. The dashboard reflects live gems, remaining piñatas, interval and observed placement speed.",
                     color = windowFailed == 0
                         and (
                             windowCycles == 0
