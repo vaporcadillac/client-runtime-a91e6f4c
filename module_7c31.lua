@@ -2117,6 +2117,7 @@ task.spawn(function()
                 pinatasRemaining = lastKnownTotal,
                 supplyDurationMinutes = supplyMinutes,
                 pinatasConsumed = math.max(0, initialTotal - lastKnownTotal),
+                dailyPinatasConsumed = dailyPinatasConsumed,
                 runtimeSeconds = elapsed,
                 lastConfirmationAt = telemetryLastConfirmationAt,
                 uptimePercent = uptimePercent,
