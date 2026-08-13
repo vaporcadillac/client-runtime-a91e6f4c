@@ -1,5 +1,5 @@
 local env = getgenv()
-local LEDGER_BUILD = "fleet-ledger-1.3"
+local LEDGER_BUILD = "fleet-ledger-1.4"
 
 if env.GLEDGER_ENABLED == false then
     return
@@ -37,8 +37,8 @@ task.spawn(function()
             numberSetting("GLEDGER_SAMPLE_SECONDS", 2)
         ),
         REPORT_SECONDS = math.max(
-            300,
-            numberSetting("GLEDGER_REPORT_SECONDS", 60 * 60)
+            3 * 60 * 60,
+            numberSetting("GLEDGER_REPORT_SECONDS", 3 * 60 * 60)
         ),
         REPORT_STAGGER_MAX = math.max(
             0,
@@ -921,7 +921,7 @@ task.spawn(function()
         }
 
         enqueueWebhook(
-            "Fleet Profit Ledger • Hourly Report",
+            "Fleet Profit Ledger • 3-Hour Report",
             description,
             fields,
             3447003
