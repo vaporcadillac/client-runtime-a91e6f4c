@@ -1494,11 +1494,11 @@ task.spawn(function()
         end)
 
         -- ==========================================
-        -- O(1) INVENTORY CACHE LAYER
+        -- O(1) INVENTORY CACHE LAYER (GSCRIPT-PROOF)
         -- ==========================================
         local saveCache = { data = nil, total = 0, uid = nil, version = 0 }
         local saveCacheAt = 0
-        local SAVE_CACHE_TTL = 1.5
+        local SAVE_CACHE_TTL = 2.0 -- Increased from 1.5s to 2.0s to ignore GScript rapid mutations
 
         local function normalize(value)
             if type(value) ~= "string" then return "" end
@@ -1567,6 +1567,8 @@ task.spawn(function()
             local selectedUid = nil
             local selectedAmount = 0
             local total = 0
+            
+            -- STRICT MATCHING: Only pay attention to Mini Pinatas. Ignore GScript's gift/egg noise.
             for uid, item in pairs(misc) do
                 if type(uid) == "string" and type(item) == "table" then
                     local itemId = item.id or item._id or item.ID or item.Name or item.name
@@ -1582,6 +1584,7 @@ task.spawn(function()
                     end
                 end
             end
+            
             dashboard.pinatas = total
             return selectedUid, total, true
         end
@@ -1873,7 +1876,7 @@ task.spawn(function()
 
         local function telemetryStatus()
             if dashboard.state == "Circuit" then return "blocked" end
-            if dashboard.state == "Fault" or dashboard.state == "Stopped" then return "offline" end
+            if dashboard.state == "Fault" or dashboard.state = "Stopped" then return "offline" end
             if dashboard.state == "Paused" or dashboard.state == "Booting" then return "degraded" end
             return "healthy"
         end
