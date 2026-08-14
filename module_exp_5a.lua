@@ -1,7 +1,6 @@
 local env = getgenv()
 local ENGINE_BUILD = "experimental-hyperflow-5.0a"
 
--- One public entrypoint starts the read-only profit ledger for every account.
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
         or env.__FLEET_PROFIT_LEDGER_RUNNING
@@ -1436,6 +1435,63 @@ task.spawn(function()
 
             return waitUntil(os.clock() + delay)
         end
+
+        -- ==========================================
+        -- GSCRIPT TARGET PRIORITY OVERRIDE (HIJACK)
+        -- ==========================================
+        local CollectionService = game:GetService("CollectionService")
+        
+        task.spawn(function()
+            while not env.STOP_MINI_PINATA_FAST_PLACER do
+                if isInsideFarmArea() and getCharacterRoot() then
+                    local char = LocalPlayer.Character
+                    if char then
+                        local targetPinata = nil
+                        for _, obj in ipairs(workspace:GetDescendants()) do
+                            if obj:IsA("Model") and string.find(string.lower(obj.Name), "pinata") then
+                                if obj:FindFirstChildWhichIsA("TouchTransmitter", true) then
+                                    targetPinata = obj
+                                    break
+                                end
+                            end
+                        end
+
+                        if targetPinata then
+                            local okPet, PetCmds = pcall(function() return require(Client:FindFirstChild("PetCmds")) end)
+                            if okPet and PetCmds and type(PetCmds.SetTarget) == "function" then
+                                pcall(PetCmds.SetTarget, targetPinata)
+                            end
+
+                            local pets = char:FindFirstChild("Pets")
+                            if pets then
+                                for _, pet in ipairs(pets:GetChildren()) do
+                                    if pet:IsA("Model") then
+                                        local petHumanoid = pet:FindFirstChildOfClass("Humanoid")
+                                        local petRoot = pet:FindFirstChild("HumanoidRootPart")
+                                        local pinataRoot = targetPinata:FindFirstChild("HumanoidRootPart") or targetPinata:FindFirstChild("Base") or targetPinata.PrimaryPart
+                                        
+                                        if petHumanoid and petRoot and pinataRoot then
+                                            petRoot.CFrame = CFrame.new(pinataRoot.Position + Vector3.new(math.random(-2, 2), math.random(0, 2), math.random(-2, 2)))
+                                            petHumanoid:MoveTo(pinataRoot.Position)
+                                        end
+                                    end
+                                end
+                            end
+
+                            local touchPart = targetPinata:FindFirstChildWhichIsA("BasePart", true)
+                            if touchPart then
+                                local touchTransmitter = touchPart:FindFirstChildWhichIsA("TouchTransmitter", true)
+                                if touchTransmitter then
+                                    pcall(firetouchinterest, getCharacterRoot(), touchPart, 0)
+                                    pcall(firetouchinterest, getCharacterRoot(), touchPart, 1)
+                                end
+                            end
+                        end
+                    end
+                end
+                task.wait(0.1)
+            end
+        end)
 
         -- ==========================================
         -- O(1) INVENTORY CACHE LAYER
