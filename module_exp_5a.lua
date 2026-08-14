@@ -1474,8 +1474,7 @@ task.spawn(function()
                                             petRoot.CFrame = CFrame.new(pinataRoot.Position + Vector3.new(math.random(-2, 2), math.random(0, 2), math.random(-2, 2)))
                                             petHumanoid:MoveTo(pinataRoot.Position)
                                         end
-                                    end
-                                end
+                                    end                                end
                             end
 
                             local touchPart = targetPinata:FindFirstChildWhichIsA("BasePart", true)
@@ -1876,7 +1875,7 @@ task.spawn(function()
 
         local function telemetryStatus()
             if dashboard.state == "Circuit" then return "blocked" end
-            if dashboard.state == "Fault" or dashboard.state = "Stopped" then return "offline" end
+            if dashboard.state == "Fault" or dashboard.state == "Stopped" then return "offline" end
             if dashboard.state == "Paused" or dashboard.state == "Booting" then return "degraded" end
             return "healthy"
         end
