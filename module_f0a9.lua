@@ -406,7 +406,16 @@ task.spawn(function()
     local Save = require(Client:WaitForChild("Save"))
     local MapCmds = nil
 
+    -- v2.0 efficiency: prefer the piñata engine's O(1) inventory cache
+    -- (same underlying table, already deserialized) instead of running a
+    -- second full Save.Get() every sample tick. Falls back to our own
+    -- fetch when the engine isn't running (e.g. account 5).
     local function getSaveData()
+        local engineCache = env.GPINATA_SAVE_CACHE_DATA
+        if type(engineCache) == "table" then
+            return engineCache
+        end
+
         local ok, data = pcall(Save.Get)
         return ok and type(data) == "table" and data or nil
     end
@@ -788,6 +797,8 @@ task.spawn(function()
         + SETTINGS.REPORT_SECONDS
         + reportStagger
     local lastCheckpointAt = reportStartedAt
+    local lastProfileWriteAt = 0
+    local SAVE_WRITE_MIN_INTERVAL = 60
     local totalSamples = 0
     local farmSamples = 0
     local unknownFarmSamples = 0
@@ -1008,8 +1019,18 @@ task.spawn(function()
             if profileChanged then
                 profile.lastGems = currentGems
                 profile.lastItems = table.clone(currentItems)
-                saveProfile()
-                lastCheckpointAt = os.clock()
+
+                -- v2.0: throttle disk writes. During farming, gems move
+                -- every sample tick; writing the profile each time meant
+                -- JSON-encode + file write every ~2s, all day. State is
+                -- kept in memory; disk syncs at most once per
+                -- SAVE_WRITE_MIN_INTERVAL, and unconditionally on the
+                -- periodic checkpoint below.
+                if os.clock() - lastProfileWriteAt >= SAVE_WRITE_MIN_INTERVAL then
+                    saveProfile()
+                    lastProfileWriteAt = os.clock()
+                    lastCheckpointAt = os.clock()
+                end
             end
         end
 

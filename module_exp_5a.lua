@@ -1689,6 +1689,7 @@ task.spawn(function()
             if ok and type(data) == "table" then
                 local uid, total, ready = rawFindItemStack(data)
                 saveCache.data = data
+                env.GPINATA_SAVE_CACHE_DATA = data
                 saveCache.uid = uid
                 saveCache.total = total
                 saveCache.version += 1
