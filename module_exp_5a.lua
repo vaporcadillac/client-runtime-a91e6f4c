@@ -861,6 +861,7 @@ task.spawn(function()
             engineBuild = ENGINE_BUILD,
         }
         local calibrationPersistent = SETTINGS.CALIBRATION
+        local calibrationLoadedRemembered = false
             and SETTINGS.CALIBRATION_PERSIST
             and readCalibrationFile ~= nil
             and writeCalibrationFile ~= nil
@@ -941,6 +942,10 @@ task.spawn(function()
                 currentInterval,
                 calibrationProfile.recommendedInterval
             )
+            -- v2.0 anti-drift: flag that this run started from a
+            -- remembered interval, so early rejections on a stricter
+            -- server can demote it (see updateAdaptiveRate).
+            calibrationLoadedRemembered = true
             dashboard.calibration = string.format(
                 not versionMatches
                     and "Game update • validating %.2fs"
@@ -2364,6 +2369,29 @@ task.spawn(function()
             pushAdaptiveHistory(cycleConfirmed, cycleRejected, usedSecondRetry)
             adaptiveWindowCycles += 1
             if cycleRejected then adaptiveWindowRejected += 1 end
+
+            -- v2.0 anti-drift: if we booted from a remembered interval
+            -- but the first cycles on THIS server reject well above the
+            -- calibration bar, the new server's floor is stricter than
+            -- the remembered one. Demote the profile to provisional and
+            -- let the adaptive controller re-qualify from current
+            -- evidence instead of bleeding rejections for a full
+            -- calibration segment.
+            if calibrationLoadedRemembered
+                and not calibrationProfile.provisional
+                and adaptiveWindowCycles + adaptiveHistoryCount <= 20
+                and adaptiveWindowRejected >= 2
+            then
+                calibrationProfile.provisional = true
+                calibrationProfile.provisionalReason = "early rejections exceed calibration on this server"
+                resetCalibrationSegment("server drift detected")
+                dashboard.calibration = string.format(
+                    "Validating %.2fs • server drift",
+                    currentInterval
+                )
+                print("[Runtime] Calibration | remembered interval marked provisional: new server rejecting above calibration rate")
+            end
+
             if adaptiveWindowCycles < SETTINGS.ADAPTIVE_WINDOW then return end
             local rejectRate = adaptiveWindowRejected / adaptiveWindowCycles
             local historyCycles = adaptiveHistoryCount
