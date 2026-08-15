@@ -1086,9 +1086,10 @@ task.spawn(function()
         -- below.
         do
             local zoneFloor = recallZoneInterval(SETTINGS.TARGET_ZONE)
+            local maxInterval = SETTINGS.ADAPTIVE_MAX_INTERVAL
 
-            if zoneFloor and zoneFloor > currentInterval then
-                currentInterval = math.min(zoneFloor, SETTINGS.ADAPTIVE_MAX_INTERVAL)
+            if zoneFloor and maxInterval and zoneFloor > currentInterval then
+                currentInterval = math.min(zoneFloor, maxInterval)
                 dashboard.calibration = string.format(
                     "Zone floor %.2fs pre-loaded",
                     currentInterval
