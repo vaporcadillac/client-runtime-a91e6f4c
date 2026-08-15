@@ -1085,8 +1085,8 @@ task.spawn(function()
         -- zone-specific one so a stricter zone floor is never started
         -- below.
         do
-            local zoneFloor = recallZoneInterval(SETTINGS.TARGET_ZONE)
-            local maxInterval = SETTINGS.ADAPTIVE_MAX_INTERVAL
+            local zoneFloor = tonumber(recallZoneInterval(tonumber(SETTINGS.TARGET_ZONE)))
+            local maxInterval = tonumber(SETTINGS.ADAPTIVE_MAX_INTERVAL)
 
             if zoneFloor and maxInterval and zoneFloor > currentInterval then
                 currentInterval = math.min(zoneFloor, maxInterval)
