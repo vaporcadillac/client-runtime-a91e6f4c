@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "experimental-hyperflow-5.0a"
+local ENGINE_BUILD = "experimental-hyperflow-5.1b"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -518,8 +518,15 @@ task.spawn(function()
     local heartbeatAt = os.clock()
     local heartbeatState = "boot"
     local cancellationFailed = false
+    local engineThreadId = nil
 
     local function heartbeat(state)
+        -- Only the engine thread feeds the watchdog. Background loops
+        -- (hijack, cache monitor, telemetry) must not mask a stall.
+        if engineThreadId ~= nil and coroutine.running() ~= engineThreadId then
+            return
+        end
+
         heartbeatAt = os.clock()
 
         if state then
@@ -564,6 +571,14 @@ task.spawn(function()
     end
 
     local function runEngine()
+        engineThreadId = coroutine.running()
+
+        -- Generation token: background loops from a previous engine
+        -- incarnation exit when this changes, preventing accumulation
+        -- across supervisor fault restarts.
+        local engineGeneration = (env.__GPINATA_ENGINE_GENERATION or 0) + 1
+        env.__GPINATA_ENGINE_GENERATION = engineGeneration
+
         heartbeat("engine initialization")
 
         local SETTINGS = {
@@ -770,15 +785,33 @@ task.spawn(function()
         end
 
         local function waitUntil(deadline)
+            -- At a 10 FPS cap each task.wait rounds up to a ~100ms frame,
+            -- so the final approach ramps FPS for ~16ms scheduling
+            -- granularity instead of overshooting the deadline.
+            local fpsRamped = false
+
             while not env.STOP_MINI_PINATA_FAST_PLACER do
                 heartbeat("scheduled interval wait")
                 local remaining = deadline - os.clock()
 
                 if remaining <= 0 then
+                    if fpsRamped then
+                        applyFpsCap()
+                    end
+
                     return true
                 end
 
-                task.wait(math.max(0.05, math.min(0.25, remaining)))
+                if remaining <= 0.75 and not fpsRamped then
+                    fpsRamped = true
+                    applyFpsCap(60)
+                end
+
+                task.wait(math.max(0.03, math.min(0.25, remaining)))
+            end
+
+            if fpsRamped then
+                applyFpsCap()
             end
 
             return false
@@ -786,6 +819,7 @@ task.spawn(function()
 
         applyFpsCap()
 
+        local RunService = game:GetService("RunService")
         local ReplicatedStorage = game:GetService("ReplicatedStorage")
         local Players = game:GetService("Players")
         local LocalPlayer = Players.LocalPlayer
@@ -1234,7 +1268,7 @@ task.spawn(function()
                 and os.clock() < deadline
             do
                 heartbeat("remote response wait")
-                task.wait(0.1)
+                task.wait(0.03)
             end
 
             if completed then
@@ -1438,57 +1472,117 @@ task.spawn(function()
 
         -- ==========================================
         -- GSCRIPT TARGET PRIORITY OVERRIDE (HIJACK)
+        -- Incremental target set: one initial
+        -- GetDescendants pass, then DescendantAdded/
+        -- DescendantRemoving keep the set current.
+        -- O(changes) instead of a full tree walk at 10Hz.
         -- ==========================================
-        local CollectionService = game:GetService("CollectionService")
-        
         task.spawn(function()
-            while not env.STOP_MINI_PINATA_FAST_PLACER do
+            local PetCmds = nil
+            local pinataTargets = {}
+            local connections = {}
+
+            local function isPinataModel(obj)
+                return obj:IsA("Model")
+                    and string.find(string.lower(obj.Name), "pinata", 1, true) ~= nil
+            end
+
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                if isPinataModel(obj) then
+                    pinataTargets[obj] = true
+                end
+            end
+
+            table.insert(connections, workspace.DescendantAdded:Connect(function(obj)
+                if isPinataModel(obj) then
+                    pinataTargets[obj] = true
+                end
+            end))
+
+            table.insert(connections, workspace.DescendantRemoving:Connect(function(obj)
+                pinataTargets[obj] = nil
+            end))
+
+            while not env.STOP_MINI_PINATA_FAST_PLACER
+                and env.__GPINATA_ENGINE_GENERATION == engineGeneration
+            do
                 if isInsideFarmArea() and getCharacterRoot() then
-                    local char = LocalPlayer.Character
-                    if char then
-                        local targetPinata = nil
-                        for _, obj in ipairs(workspace:GetDescendants()) do
-                            if obj:IsA("Model") and string.find(string.lower(obj.Name), "pinata") then
-                                if obj:FindFirstChildWhichIsA("TouchTransmitter", true) then
-                                    targetPinata = obj
-                                    break
-                                end
-                            end
-                        end
+                    if not PetCmds then
+                        local moduleScript = Client:FindFirstChild("PetCmds")
 
-                        if targetPinata then
-                            local okPet, PetCmds = pcall(function() return require(Client:FindFirstChild("PetCmds")) end)
-                            if okPet and PetCmds and type(PetCmds.SetTarget) == "function" then
-                                pcall(PetCmds.SetTarget, targetPinata)
-                            end
+                        if moduleScript then
+                            local ok, module = pcall(require, moduleScript)
 
-                            local pets = char:FindFirstChild("Pets")
-                            if pets then
-                                for _, pet in ipairs(pets:GetChildren()) do
-                                    if pet:IsA("Model") then
-                                        local petHumanoid = pet:FindFirstChildOfClass("Humanoid")
-                                        local petRoot = pet:FindFirstChild("HumanoidRootPart")
-                                        local pinataRoot = targetPinata:FindFirstChild("HumanoidRootPart") or targetPinata:FindFirstChild("Base") or targetPinata.PrimaryPart
-                                        
-                                        if petHumanoid and petRoot and pinataRoot then
-                                            petRoot.CFrame = CFrame.new(pinataRoot.Position + Vector3.new(math.random(-2, 2), math.random(0, 2), math.random(-2, 2)))
-                                            petHumanoid:MoveTo(pinataRoot.Position)
-                                        end
-                                    end                                end
-                            end
-
-                            local touchPart = targetPinata:FindFirstChildWhichIsA("BasePart", true)
-                            if touchPart then
-                                local touchTransmitter = touchPart:FindFirstChildWhichIsA("TouchTransmitter", true)
-                                if touchTransmitter then
-                                    pcall(firetouchinterest, getCharacterRoot(), touchPart, 0)
-                                    pcall(firetouchinterest, getCharacterRoot(), touchPart, 1)
-                                end
+                            if ok
+                                and type(module) == "table"
+                                and type(module.SetTarget) == "function"
+                            then
+                                PetCmds = module
                             end
                         end
                     end
+
+                    local char = LocalPlayer.Character
+                    local targetPinata = nil
+
+                    for obj in pairs(pinataTargets) do
+                        if obj.Parent
+                            and obj:FindFirstChildWhichIsA("TouchTransmitter", true)
+                        then
+                            targetPinata = obj
+                            break
+                        end
+                    end
+
+                    if targetPinata and char then
+                        if PetCmds then
+                            pcall(PetCmds.SetTarget, targetPinata)
+                        end
+
+                        local pets = char:FindFirstChild("Pets")
+                        local pinataRoot = targetPinata:FindFirstChild("HumanoidRootPart")
+                            or targetPinata:FindFirstChild("Base")
+                            or targetPinata.PrimaryPart
+
+                        if pets and pinataRoot then
+                            for _, pet in ipairs(pets:GetChildren()) do
+                                if pet:IsA("Model") then
+                                    local petHumanoid = pet:FindFirstChildOfClass("Humanoid")
+                                    local petRoot = pet:FindFirstChild("HumanoidRootPart")
+
+                                    if petHumanoid and petRoot then
+                                        petRoot.CFrame = CFrame.new(
+                                            pinataRoot.Position
+                                                + Vector3.new(
+                                                    math.random(-2, 2),
+                                                    math.random(0, 2),
+                                                    math.random(-2, 2)
+                                                )
+                                        )
+                                        petHumanoid:MoveTo(pinataRoot.Position)
+                                    end
+                                end
+                            end
+                        end
+
+                        local touchPart = targetPinata:FindFirstChildWhichIsA("BasePart", true)
+                        local characterRoot = getCharacterRoot()
+
+                        if touchPart
+                            and characterRoot
+                            and touchPart:FindFirstChildWhichIsA("TouchTransmitter", true)
+                        then
+                            pcall(firetouchinterest, characterRoot, touchPart, 0)
+                            pcall(firetouchinterest, characterRoot, touchPart, 1)
+                        end
+                    end
                 end
+
                 task.wait(0.1)
+            end
+
+            for _, connection in ipairs(connections) do
+                pcall(connection.Disconnect, connection)
             end
         end)
 
@@ -1655,7 +1749,9 @@ task.spawn(function()
 
         -- Background cache monitor
         task.spawn(function()
-            while not env.STOP_MINI_PINATA_FAST_PLACER do
+            while not env.STOP_MINI_PINATA_FAST_PLACER
+                and env.__GPINATA_ENGINE_GENERATION == engineGeneration
+            do
                 if os.clock() - saveCacheAt >= SAVE_CACHE_TTL - 0.1 then
                     refreshSaveCache()
                 end
@@ -1758,6 +1854,21 @@ task.spawn(function()
         local lastKnownTotal = initialTotal
         local noItemsRemain = false
         local lastSuccessAt = os.clock()
+
+        -- Phase timing (EMA, milliseconds): where the per-cycle time
+        -- beyond the interval actually goes.
+        --   gateOvershoot: how late the invoke landed past the pacing gate
+        --   invokeLatency: gate-cross to server response (incl. FPS spike)
+        --   postConfirm:   response arrival to cycle bookkeeping complete
+        local phaseStats = {
+            gateOvershootMs = 0,
+            invokeLatencyMs = 0,
+            postConfirmMs = 0,
+        }
+
+        local function samplePhaseStat(key, milliseconds)
+            phaseStats[key] = phaseStats[key] * 0.9 + math.max(0, milliseconds) * 0.1
+        end
 
         local telemetryRequest = resolveRequestFunction()
         local telemetryEndpoint = type(env.GTELEMETRY_ENDPOINT) == "string" and env.GTELEMETRY_ENDPOINT:match("^https://[^%s]+$") or nil
@@ -1918,6 +2029,9 @@ task.spawn(function()
                 confirmed = confirmed,
                 attempted = cycles,
                 adaptiveIntervalSeconds = currentInterval,
+                phaseGateOvershootMs = math.floor(phaseStats.gateOvershootMs + 0.5),
+                phaseInvokeLatencyMs = math.floor(phaseStats.invokeLatencyMs + 0.5),
+                phasePostConfirmMs = math.floor(phaseStats.postConfirmMs + 0.5),
                 pinatasRemaining = lastKnownTotal,
                 supplyDurationMinutes = supplyMinutes,
                 pinatasConsumed = math.max(0, initialTotal - lastKnownTotal),
@@ -1952,7 +2066,9 @@ task.spawn(function()
             if telemetryPublisherRunning or not telemetryRequest or not telemetryEndpoint or not telemetryWriteKey then return end
             telemetryPublisherRunning = true
             task.spawn(function()
-                while not env.STOP_MINI_PINATA_FAST_PLACER do
+                while not env.STOP_MINI_PINATA_FAST_PLACER
+                    and env.__GPINATA_ENGINE_GENERATION == engineGeneration
+                do
                     publishTelemetry()
                     local deadline = os.clock() + telemetryInterval
                     while not env.STOP_MINI_PINATA_FAST_PLACER and os.clock() < deadline do
@@ -2005,7 +2121,7 @@ task.spawn(function()
                 dashboard.state = "Running"
             end
             if shouldPrint then
-                print(string.format("[Runtime] Status | cycles %d | confirmed %d | calls %d | retries %d | recovered %d | retry2 %d | rejected %d | failed %d | reject streak %d | errors %d | timeouts %d | interval %.2fs | %.1f/hour | %.0f/day | response %s", cycles, confirmed, remoteCalls, retries, recoveredCycles, secondRetryRecoveries, rejected, failedCycles, rejectedStreak, errors, timeouts, currentInterval, acceptedPerHour, projectedPerDay, tostring(lastResponse)))
+                print(string.format("[Runtime] Status | cycles %d | confirmed %d | calls %d | retries %d | recovered %d | retry2 %d | rejected %d | failed %d | reject streak %d | errors %d | timeouts %d | interval %.2fs | %.1f/hour | %.0f/day | response %s | overhead gate %.0fms invoke %.0fms post %.0fms", cycles, confirmed, remoteCalls, retries, recoveredCycles, secondRetryRecoveries, rejected, failedCycles, rejectedStreak, errors, timeouts, currentInterval, acceptedPerHour, projectedPerDay, tostring(lastResponse), phaseStats.gateOvershootMs, phaseStats.invokeLatencyMs, phaseStats.postConfirmMs))
             end
             if shouldWebhook then
                 lastWebhookStatusAt = now
@@ -2039,7 +2155,7 @@ task.spawn(function()
                     targetZone = SETTINGS.TARGET_ZONE,
                     fields = {
                         webhookField("📊 Last 35 Minutes", string.format("**%s/%s confirmed** — %.2f%%\n**%.1f/hour observed** • Calls: %s • Efficiency: %.2f%%\nGems: **%s** • Piñatas used: **%s**\nRecovered: %s • Rejections: %s • Failed: %s\nWindow: %s • Circuit downtime: %s", formatInteger(windowConfirmed), formatInteger(windowCycles), windowSuccessRate, windowPerHour, formatInteger(windowCalls), windowCallEfficiency, windowGemText, formatInteger(windowPinatasUsed), formatInteger(windowRecovered), formatInteger(windowRejected), formatInteger(windowFailed), formatDuration(windowElapsed), formatDuration(windowCircuitDowntime)), false),
-                        webhookField("⚡ Placement Performance", string.format("**%s/%s confirmed** — %.2f%%\n**%.1f/hour** — %.0f/day\nCurrent interval: **%.2fs**", formatInteger(confirmed), formatInteger(cycles), successRate, acceptedPerHour, projectedPerDay, currentInterval), false),
+                        webhookField("⚡ Placement Performance", string.format("**%s/%s confirmed** — %.2f%%\n**%.1f/hour** — %.0f/day\nCurrent interval: **%.2fs**\nCycle overhead: gate **%.0fms** • invoke **%.0fms** • post **%.0fms**", formatInteger(confirmed), formatInteger(cycles), successRate, acceptedPerHour, projectedPerDay, currentInterval, phaseStats.gateOvershootMs, phaseStats.invokeLatencyMs, phaseStats.postConfirmMs), false),
                         webhookField("🛡️ Consistency", string.format("First-pass acceptance: **%.2f%%**\nCall efficiency: **%.2f%%**\nRejections: %s • Failed cycles: %s", initialPassRate, callEfficiency, formatInteger(rejected), formatInteger(failedCycles)), false),
                         webhookField("🔁 Recovery", string.format("Recovered: %s (%.2f%%)\nRetry 1: %s • Retry 2: %s • Late: %s", formatInteger(recoveredCycles), recoveryRate, formatInteger(firstRetryRecoveries), formatInteger(secondRetryRecoveries), formatInteger(lateConfirmations)), false),
                         webhookField("🧠 Account Calibration", tostring(dashboard.calibration) .. "\nCircuit: " .. (circuitBreakerActive and string.format("ACTIVE — %.0fs probe", circuitBreakerDelay) or "inactive") .. " • Trips: " .. formatInteger(circuitBreakerTrips), false),
@@ -2367,6 +2483,7 @@ task.spawn(function()
             local cycleUsedSecondRetry = false
             local cycleRecoveredFailureStreak = 0
             local cycleRecoveredFromCircuit = false
+            local cycleResponseAt = nil
             local cycleRetryLimit = rejectedStreak >= SETTINGS.RETRY_DISABLE_AFTER and 0 or SETTINGS.MAX_RETRIES
 
             for retryIndex = 0, cycleRetryLimit do
@@ -2417,14 +2534,39 @@ task.spawn(function()
                 local endpoint = getConsumeEndpoint()
                 if not endpoint then error("[Runtime] Consume endpoint became unavailable.") end
 
-                -- FPS boost during remote invocation
+                -- Cooldown-anchored pacing gate: the invoke lands exactly
+                -- one interval after the last confirmed consume, plus
+                -- jitter. This removes cycle-start scheduling overhead
+                -- (farm check, cache read, task.wait frame rounding) from
+                -- the effective inter-invoke interval.
+                local pacingJitter = SETTINGS.PACING_JITTER_MAX > 0
+                    and math.random() * SETTINGS.PACING_JITTER_MAX
+                    or 0
+                local invokeGate = lastSuccessAt + currentInterval + pacingJitter
+
+                if os.clock() < invokeGate and not waitUntil(invokeGate) then break end
+
+                local invokeStartedAt = os.clock()
+
+                if retryIndex == 0 then
+                    samplePhaseStat("gateOvershootMs", (invokeStartedAt - invokeGate) * 1000)
+                end
+
+                -- FPS boost during remote invocation; yield one frame so
+                -- the raised cap is live before the remote fires.
                 applyFpsCap(60)
+                RunService.Heartbeat:Wait()
 
                 local ok, response, didTimeout = invokeConsumeWithTimeout(endpoint, uid)
+                cycleResponseAt = os.clock()
                 heartbeat("remote invocation complete")
 
                 -- Drop FPS back down for idle wait
                 applyFpsCap(SETTINGS.FPS)
+
+                if retryIndex == 0 then
+                    samplePhaseStat("invokeLatencyMs", (cycleResponseAt - invokeStartedAt) * 1000)
+                end
 
                 lastResponse = response
                 if didTimeout then timeouts += 1 end
@@ -2478,12 +2620,14 @@ task.spawn(function()
                     cycleRecoveredFromCircuit = cycleRecoveredFromCircuit or recoveredFromCircuit == true
                     cycleFinished = true
                 elseif retryIndex < cycleRetryLimit then
-                    -- Rejection-aware predictive scheduling
-                    local timeSinceSuccess = os.clock() - lastSuccessAt
-                    local dynamicRetryDelay = math.max(0.1, 5.5 - timeSinceSuccess)
-                    local retryWait = math.max(dynamicRetryDelay, retryIndex == 0 and SETTINGS.RETRY_DELAY or SETTINGS.RECOVERY_RETRY_DELAY)
+                    -- Cooldown-anchored retry: land the retry exactly on
+                    -- the pacing gate instead of a fixed delay.
+                    local retryGate = math.max(
+                        lastSuccessAt + currentInterval,
+                        os.clock() + 0.1
+                    )
 
-                    if not waitUntil(os.clock() + retryWait) then break end
+                    if not waitUntil(retryGate) then break end
 
                     local lateTotal = getReliableTotal()
                     if lateTotal and totalBefore > 0 and lateTotal < totalBefore then
@@ -2528,10 +2672,18 @@ task.spawn(function()
                 updateAdaptiveRate(cycleConfirmed, cycleHadServerReject, cycleUsedSecondRetry, cycleRecoveredFailureStreak, cycleRecoveredFromCircuit)
                 heartbeat("adaptive update complete")
 
+                if cycleConfirmed
+                    and not cycleHadServerReject
+                    and cycleResponseAt ~= nil
+                then
+                    samplePhaseStat("postConfirmMs", (os.clock() - cycleResponseAt) * 1000)
+                end
+
                 local scheduleBase = os.clock()
                 if cycleConfirmed then
-                    local jitter = SETTINGS.PACING_JITTER_MAX > 0 and math.random() * SETTINGS.PACING_JITTER_MAX or 0
-                    nextAttemptAt = scheduleBase + currentInterval + jitter
+                    -- Pacing is enforced at the invoke gate; re-loop
+                    -- immediately so pre-invoke work overlaps the wait.
+                    nextAttemptAt = scheduleBase
                 elseif circuitBreakerActive then
                     nextAttemptAt = scheduleBase + circuitBreakerDelay
                 else
