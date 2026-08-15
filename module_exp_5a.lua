@@ -1843,6 +1843,23 @@ task.spawn(function()
         local placementRunStartedAt = os.clock()
         local lastWebhookStatusAt = placementRunStartedAt
         local lastReportAt = placementRunStartedAt
+
+        -- v2.0 observability: rejoin counter (persists across supervisor
+        -- restarts via calibration file) and server age. Server-side
+        -- cooldown floors vary per server instance; a rejoin landing on
+        -- a stricter server is the #1 cause of one-account divergence,
+        -- and these two fields make that diagnosis instant from the
+        -- webhook instead of requiring console archaeology.
+        env.__GPINATA_REJOINS_THIS_SESSION = (env.__GPINATA_REJOINS_THIS_SESSION or 0) + 1
+        local rejoinsThisSession = env.__GPINATA_REJOINS_THIS_SESSION
+
+        local function serverAgeSeconds()
+            local ok, started = pcall(function()
+                return workspace:GetServerTimeNow() - game.PrivateServerIdSeqId
+            end)
+
+            return ok and started or nil
+        end
         local cycles = 0
         local confirmed = 0
         local remoteCalls = 0
@@ -2051,6 +2068,8 @@ task.spawn(function()
                 pinatasConsumed = math.max(0, initialTotal - lastKnownTotal),
                 dailyPinatasConsumed = dailyPinatasConsumed,
                 runtimeSeconds = elapsed,
+                engineRejoinsThisSession = rejoinsThisSession,
+                serverAgeSeconds = serverAgeSeconds(),
                 lastConfirmationAt = telemetryLastConfirmationAt,
                 uptimePercent = uptimePercent,
                 windowNetGain = windowNetGain,
@@ -2174,7 +2193,7 @@ task.spawn(function()
                         webhookField("🔁 Recovery", string.format("Recovered: %s (%.2f%%)\nRetry 1: %s • Retry 2: %s • Late: %s", formatInteger(recoveredCycles), recoveryRate, formatInteger(firstRetryRecoveries), formatInteger(secondRetryRecoveries), formatInteger(lateConfirmations)), false),
                         webhookField("🧠 Account Calibration", tostring(dashboard.calibration) .. "\nCircuit: " .. (circuitBreakerActive and string.format("ACTIVE — %.0fs probe", circuitBreakerDelay) or "inactive") .. " • Trips: " .. formatInteger(circuitBreakerTrips), false),
                         webhookField("📡 Communication Health", string.format("%s\nCalls: %s • Errors: %s • Timeouts: %s\nWindow errors: %s • Window timeouts: %s\nLast response: `%s`", tostring(dashboard.remote), formatInteger(remoteCalls), formatInteger(errors), formatInteger(timeouts), formatInteger(windowErrors), formatInteger(windowTimeouts), tostring(lastResponse)), false),
-                        webhookField("🕒 Run Snapshot", string.format("Remaining supply: %s\nCompleted cycles: %s\nNext scheduled update: 35 minutes", formatInteger(lastKnownTotal), formatInteger(cycles)), false),
+                        webhookField("🕒 Run Snapshot", string.format("Remaining supply: %s\nCompleted cycles: %s\nEngine restarts this session: %s\nNext scheduled update: 35 minutes", formatInteger(lastKnownTotal), formatInteger(cycles), tostring(rejoinsThisSession)), false),
                     },
                 })
                 lastReportAt = now
