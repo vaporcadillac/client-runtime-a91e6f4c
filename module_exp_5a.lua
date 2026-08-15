@@ -1317,8 +1317,19 @@ task.spawn(function()
             return MapCmds
         end
 
+        -- v2.0: TTL cache for the farm-area check. The hijack loop calls
+        -- this at 10Hz and every placement cycle calls it too, but farm
+        -- state never flips inside 0.5s — IsInDottedBox (a pcalled game
+        -- module) runs at most twice a second regardless of caller.
+        local farmCheckCache = { value = false, at = 0 }
+        local FARM_CHECK_TTL = 0.5
+
         local function isInsideFarmArea()
             heartbeat("farm-area check")
+
+            if os.clock() - farmCheckCache.at < FARM_CHECK_TTL then
+                return farmCheckCache.value
+            end
 
             local module = getMapCmds()
 
@@ -1328,7 +1339,9 @@ task.spawn(function()
 
             local ok, result = pcall(module.IsInDottedBox)
             heartbeat("farm-area check complete")
-            return ok and result == true
+            farmCheckCache.value = ok and result == true
+            farmCheckCache.at = os.clock()
+            return farmCheckCache.value
         end
 
         local function getCharacterRoot()
