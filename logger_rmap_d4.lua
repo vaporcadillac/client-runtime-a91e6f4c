@@ -226,7 +226,12 @@ end
 print(string.format("[RMapD] Recording remote calls for %.0f minutes.", SESSION_SECONDS / 60))
 
 task.spawn(function()
-    if not game:IsLoaded() then game.Loaded:Wait() end
+    -- Poll with task.wait (a plain function, NOT a namecall) — never
+    -- game.Loaded:Wait(), which yields across the hook boundary and
+    -- would kill this flush thread (and the dump with it).
+    while not game:IsLoaded() do
+        task.wait(0.1)
+    end
 
     local lastFlush = os.clock()
 
