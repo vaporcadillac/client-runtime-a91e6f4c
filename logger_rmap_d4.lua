@@ -181,9 +181,14 @@ local function record(instance, method, args)
     end
 end
 
-hook(game, "__namecall", newcclosure(function(self, ...)
+-- hookmetamethod returns the ORIGINAL metamethod; capture it so the
+-- wrapper can pass calls through. Calling an uncaptured original was
+-- the d4 line-186 bug that broke every namecall on the client.
+local wrap = type(newcclosure) == "function" and newcclosure or function(f) return f end
+
+local originalNamecall = hook(game, "__namecall", wrap(function(self, ...)
     record(self, getMethod(), { ... })
-    return namecall(self, ...)
+    return originalNamecall(self, ...)
 end))
 
 -- FireServer goes through __namecall too, but belt-and-suspenders for
