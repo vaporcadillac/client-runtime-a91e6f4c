@@ -181,15 +181,39 @@ local function record(instance, method, args)
     end
 end
 
--- hookmetamethod returns the ORIGINAL metamethod; capture it so the
--- wrapper can pass calls through. Calling an uncaptured original was
--- the d4 line-186 bug that broke every namecall on the client.
+-- Capture the ORIGINAL __namecall BEFORE hooking, straight from the
+-- metatable. We never rely on hookmetamethod's return value (Volt's
+-- returns nothing) and never call an uncaptured original — that was
+-- the line-186/191 bug, twice.
 local wrap = type(newcclosure) == "function" and newcclosure or function(f) return f end
+local originalNamecall = nil
 
-local originalNamecall = hook(game, "__namecall", wrap(function(self, ...)
-    record(self, getMethod(), { ... })
-    return originalNamecall(self, ...)
-end))
+do
+    local captured = false
+
+    if type(getrawmetatable) == "function" then
+        local ok, gameMeta = pcall(getrawmetatable, game)
+
+        if ok and type(gameMeta) == "table" and type(gameMeta.__namecall) == "function" then
+            originalNamecall = gameMeta.__namecall
+            captured = true
+        end
+    end
+
+    if captured then
+        hook(game, "__namecall", wrap(function(self, ...)
+            record(self, getMethod(), { ... })
+            return originalNamecall(self, ...)
+        end))
+        print("[RMapD] Hook installed; original __namecall captured from metatable.")
+    else
+        -- Refuse to hook: a logger that cannot guarantee call pass-through
+        -- must never install itself. Game runs clean; dump is skipped.
+        env.__REMOTE_DUMP_RUNNING = false
+        warn("[RMapD] Could not capture original __namecall safely; logger disabled without hooking.")
+        return
+    end
+end
 
 -- FireServer goes through __namecall too, but belt-and-suspenders for
 -- executors where firesignal paths differ: hook __index is intentionally
