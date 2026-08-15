@@ -1050,8 +1050,10 @@ task.spawn(function()
 
         local ping = readPing()
 
-        if ping then
-            maximumPing = maximumPing and math.max(maximumPing, ping) or ping
+        if ping and maximumPing then
+            maximumPing = math.max(maximumPing, ping)
+        elseif ping then
+            maximumPing = ping
         end
 
         local liveWindowSeconds = math.max(1, os.clock() - reportStartedAt)
