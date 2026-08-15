@@ -1048,7 +1048,7 @@ task.spawn(function()
                 or measuredFps
         end
 
-        local ping = readPing()
+        local ping = tonumber(readPing())
 
         if ping and maximumPing then
             maximumPing = math.max(maximumPing, ping)
