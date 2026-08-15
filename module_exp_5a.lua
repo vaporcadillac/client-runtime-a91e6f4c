@@ -956,6 +956,36 @@ task.spawn(function()
             )
         end
 
+        -- v2.0 zone memory: a per-zone interval map persisted inside the
+        -- calibration profile. Different zones can sit on servers with
+        -- different cooldown floors; when GScript moves this account's
+        -- zone, the engine pre-loads the remembered zone floor instead
+        -- of probing cold. Only qualified (non-provisional) intervals
+        -- are recorded.
+        local function rememberZoneInterval(zone, interval)
+            if type(zone) ~= "number" or type(interval) ~= "number" then
+                return
+            end
+
+            if calibrationProfile.zoneIntervals == nil
+                or type(calibrationProfile.zoneIntervals) ~= "table"
+            then
+                calibrationProfile.zoneIntervals = {}
+            end
+
+            calibrationProfile.zoneIntervals[tostring(zone)] = interval
+        end
+
+        local function recallZoneInterval(zone)
+            if type(zone) ~= "number"
+                or type(calibrationProfile.zoneIntervals) ~= "table"
+            then
+                return nil
+            end
+
+            return tonumber(calibrationProfile.zoneIntervals[tostring(zone)])
+        end
+
         local function saveCalibrationProfile()
             if not calibrationPersistent then
                 return false
@@ -1048,6 +1078,22 @@ task.spawn(function()
 
         if (tonumber(calibrationProfile.zoneUnhealthyUntil) or 0) <= os.time() then
             calibrationProfile.zoneUnhealthyUntil = 0
+        end
+
+        -- v2.0 zone memory: if this zone has its own remembered floor,
+        -- honor it. Take the max of the account-wide interval and the
+        -- zone-specific one so a stricter zone floor is never started
+        -- below.
+        do
+            local zoneFloor = recallZoneInterval(SETTINGS.TARGET_ZONE)
+
+            if zoneFloor and zoneFloor > currentInterval then
+                currentInterval = math.min(zoneFloor, SETTINGS.ADAPTIVE_MAX_INTERVAL)
+                dashboard.calibration = string.format(
+                    "Zone floor %.2fs pre-loaded",
+                    currentInterval
+                )
+            end
         end
 
         dashboard.interval = currentInterval
@@ -2004,6 +2050,7 @@ task.spawn(function()
             if not qualifies then return end
             calibrationSegmentQualified = true
             calibrationProfile.recommendedInterval = currentInterval
+            rememberZoneInterval(SETTINGS.TARGET_ZONE, currentInterval)
             calibrationProfile.qualifiedCycles = calibrationSegmentCycles
             calibrationProfile.qualifiedSeconds = math.floor(elapsed)
             calibrationProfile.rejectRate = rejectRate
