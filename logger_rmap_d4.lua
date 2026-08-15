@@ -201,10 +201,14 @@ do
     end
 
     if captured then
-        hook(game, "__namecall", wrap(function(self, ...)
+        -- Plain Lua closure, NOT newcclosure: C closures cannot yield, and
+        -- any yielding namecall (Wait/WaitForChild) crossing the hook would
+        -- die at the metamethod boundary. A normal closure propagates
+        -- yields correctly.
+        hook(game, "__namecall", function(self, ...)
             record(self, getMethod(), { ... })
             return originalNamecall(self, ...)
-        end))
+        end)
         print("[RMapD] Hook installed; original __namecall captured from metatable.")
     else
         -- Refuse to hook: a logger that cannot guarantee call pass-through
