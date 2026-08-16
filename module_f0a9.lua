@@ -1,5 +1,5 @@
 local env = getgenv()
-local LEDGER_BUILD = "fleet-ledger-1.4"
+local LEDGER_BUILD = "fleet-ledger-1.5"
 
 if env.GLEDGER_ENABLED == false then
     return
@@ -69,6 +69,8 @@ task.spawn(function()
 
     local DEFAULT_ITEMS = {
         "Mini Pinata",
+        "Gift Bag",
+        "Large Gift Bag",
         "Charm Stone",
         "The Cocktail",
         "Seed Bag",

@@ -41,7 +41,7 @@ local function startFleetLedger()
                 -- declare the expected LEDGER_BUILD. A bad deploy on the
                 -- repo can no longer push arbitrary code into clients.
                 local expectedBuild = tostring(
-                    env.GLEDGER_REQUIRED_BUILD or "fleet-ledger-1.4"
+                    env.GLEDGER_REQUIRED_BUILD or "fleet-ledger-1.5"
                 )
 
                 if string.find(
