@@ -1,5 +1,5 @@
 local env = getgenv()
-local MODULE_BUILD = "giftbag-opener-1.1"
+local MODULE_BUILD = "giftbag-opener-1.2"
 
 if env.GGIFTBAG_ENABLED == false then
     return
@@ -41,9 +41,8 @@ task.spawn(function()
         MAX_INTERVAL = math.max(0.5, numberSetting("GGIFTBAG_MAX_INTERVAL", 3.0)),
         REMOTE_NAME = tostring(env.GGIFTBAG_REMOTE_NAME or "GiftBag_Open"),
         ARG_MODE = string.lower(tostring(env.GGIFTBAG_ARG_MODE or "id")),
-        MAX_BATCH = math.max(1, math.floor(numberSetting("GGIFTBAG_MAX_BATCH", 10))),
+        MAX_BATCH = math.max(1, math.floor(numberSetting("GGIFTBAG_MAX_BATCH", 50))),
         BATCH_GROW_AFTER = math.max(5, math.floor(numberSetting("GGIFTBAG_BATCH_GROW_AFTER", 25))),
-        BATCH_SHRINK_ON_REJECT = math.max(1, math.floor(numberSetting("GGIFTBAG_BATCH_SHRINK_ON_REJECT", 2))),
         REMOTE_TIMEOUT = math.max(3, numberSetting("GGIFTBAG_REMOTE_TIMEOUT", 8)),
         RESOLVE_TIMEOUT = math.max(5, numberSetting("GGIFTBAG_RESOLVE_TIMEOUT", 60)),
         VERIFY_EVERY = math.max(5, math.floor(numberSetting("GGIFTBAG_VERIFY_EVERY", 20))),
@@ -423,6 +422,13 @@ task.spawn(function()
         [normalize("Large Gift Bag")] = true,
     }
 
+    -- UI-sanctioned open denominations (remote-spy confirmed the client
+    -- only ever sends these counts). The server most likely validates
+    -- against this set, so the opener's batch ladder steps through
+    -- sanctioned values only — never synthesized counts like 3 or 25.
+    local NORMAL_BATCHES = { 1, 5, 10, 50 }
+    local LARGE_BATCHES = { 1, 5, 10 }
+
     local function entryAmount(entry)
         if type(entry) ~= "table" then
             return 1
@@ -611,9 +617,65 @@ task.spawn(function()
     local circuitBreakerDelay = 0
     local circuitTrips = 0
     local cleanStreak = 0
-    local currentBatch = 1
-    local cleanSinceBatchGrow = 0
     local externalWarned = false
+
+    -- Independent denomination ladders per bag type. Each index points
+    -- into that type's sanctioned batch table; success climbs, refusal
+    -- drops one step. Never exceeds the smaller of the ladder cap
+    -- (MAX_BATCH) and the account's current total for that type.
+    local batchIndex = { normal = 1, large = 1 }
+    local cleanSinceGrow = { normal = 0, large = 0 }
+
+    local function ladderFor(isLarge)
+        return isLarge and LARGE_BATCHES or NORMAL_BATCHES
+    end
+
+    local function batchKey(isLarge)
+        return isLarge and "large" or "normal"
+    end
+
+    local function selectBatch(isLarge, typeTotal)
+        local ladder = ladderFor(isLarge)
+        local key = batchKey(isLarge)
+        local index = batchIndex[key]
+
+        while index > 1 and ladder[index] > typeTotal do
+            index -= 1
+        end
+
+        batchIndex[key] = index
+        return ladder[index]
+    end
+
+    local function growBatch(isLarge)
+        local ladder = ladderFor(isLarge)
+        local key = batchKey(isLarge)
+
+        if batchIndex[key] < #ladder
+            and ladder[batchIndex[key] + 1] <= SETTINGS.MAX_BATCH
+        then
+            batchIndex[key] += 1
+            cleanSinceGrow[key] = 0
+
+            if SETTINGS.VERBOSE then
+                print(string.format(
+                    "[Giftbag] %s batch -> %d",
+                    isLarge and "Large" or "Normal",
+                    ladder[batchIndex[key]]
+                ))
+            end
+        end
+    end
+
+    local function shrinkBatch(isLarge)
+        local key = batchKey(isLarge)
+
+        if batchIndex[key] > 1 then
+            batchIndex[key] -= 1
+        end
+
+        cleanSinceGrow[key] = 0
+    end
     local windowOpened = 0
     local windowStartedAt = os.clock()
     local lastStatusAt = os.clock()
@@ -737,10 +799,10 @@ task.spawn(function()
     end
 
     print(string.format(
-        "[Giftbag] %s started | interval %.2fs | batch 1-%d | remote %s",
+        "[Giftbag] %s started | interval %.2fs | normal ladder 1/5/10/%d | large ladder 1/5/10 | remote %s",
         MODULE_BUILD,
         currentInterval,
-        SETTINGS.MAX_BATCH,
+        math.min(50, SETTINGS.MAX_BATCH),
         SETTINGS.REMOTE_NAME ~= "" and SETTINGS.REMOTE_NAME or "auto"
     ))
 
@@ -869,9 +931,11 @@ task.spawn(function()
                         break
                     end
 
-                    -- Adaptive batch: start conservative, grow toward
-                    -- MAX_BATCH on clean responses, shrink on refusal.
-                    local batch = math.min(currentBatch, bag.stack)
+                    -- The remote takes (id, count) and pulls from the
+                    -- account-wide total for that id, so cap the batch at
+                    -- the type aggregate — not any single stack.
+                    local typeTotal = bag.isLarge and totalLarge or total
+                    local batch = selectBatch(bag.isLarge, typeTotal)
 
                     local ok, response, fatal = invokeOpen(OpenEndpoint, bag, batch)
 
@@ -895,25 +959,23 @@ task.spawn(function()
                         openedTotal += batch
                         windowOpened += batch
                         checkpointOpened += batch
-                        bag.stack -= batch
                         rejectionStreak = 0
                         consecutiveFails = 0
                         cleanStreak += 1
-                        cleanSinceBatchGrow += 1
                         optimisticStreak += batch
 
                         if bag.isLarge then
                             openedLargeTotal += batch
-                        end
+                            cleanSinceGrow.large += 1
 
-                        if cleanSinceBatchGrow >= SETTINGS.BATCH_GROW_AFTER
-                            and currentBatch < SETTINGS.MAX_BATCH
-                        then
-                            cleanSinceBatchGrow = 0
-                            currentBatch = math.min(SETTINGS.MAX_BATCH, currentBatch + 1)
+                            if cleanSinceGrow.large >= SETTINGS.BATCH_GROW_AFTER then
+                                growBatch(true)
+                            end
+                        else
+                            cleanSinceGrow.normal += 1
 
-                            if SETTINGS.VERBOSE then
-                                print(string.format("[Giftbag] Batch -> %d", currentBatch))
+                            if cleanSinceGrow.normal >= SETTINGS.BATCH_GROW_AFTER then
+                                growBatch(false)
                             end
                         end
 
@@ -937,13 +999,9 @@ task.spawn(function()
                         dashboard.rejected = rejectedTotal
                         rejectionStreak += 1
                         cleanStreak = 0
-                        cleanSinceBatchGrow = 0
 
-                        -- A refused batch likely exceeded what the server
-                        -- will grant per call; halve before retrying.
-                        if batch > 1 then
-                            currentBatch = math.max(1, math.ceil(batch / SETTINGS.BATCH_SHRINK_ON_REJECT))
-                        end
+                        -- Refusal drops one sanctioned denomination step.
+                        shrinkBatch(bag.isLarge)
 
                         if rejectionStreak >= SETTINGS.CIRCUIT_AFTER then
                             circuitTrips += 1
@@ -1048,7 +1106,8 @@ task.spawn(function()
             backlog = dashboard.backlog,
             backlogLarge = dashboard.backlogLarge,
             interval = currentInterval,
-            batch = currentBatch,
+            batchNormal = NORMAL_BATCHES[batchIndex.normal],
+            batchLarge = LARGE_BATCHES[batchIndex.large],
             openedSession = openedTotal,
             openedLargeSession = openedLargeTotal,
             rejectedSession = rejectedTotal,
