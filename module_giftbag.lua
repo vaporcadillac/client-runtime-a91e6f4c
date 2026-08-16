@@ -969,7 +969,11 @@ task.spawn(function()
                     -- the ladder straight to the largest sanctioned rung
                     -- that fits — matching GScript's bulk-open burst —
                     -- instead of earning it 10 clean calls at a time.
-                    if effectiveNormal + effectiveLarge >= SETTINGS.DRAIN_THRESHOLD then
+                    -- Evaluated per type: normal bags drop far more often
+                    -- than large (most piñatas yield normals), so the
+                    -- normal backlog must drain on its own count, not a
+                    -- combined total that larges rarely contribute to.
+                    if effectiveForType >= SETTINGS.DRAIN_THRESHOLD then
                         local ladder = ladderFor(bag.isLarge)
                         local bestIndex = 1
 
