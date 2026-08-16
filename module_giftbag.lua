@@ -1,5 +1,5 @@
 local env = getgenv()
-local MODULE_BUILD = "giftbag-opener-1.3"
+local MODULE_BUILD = "giftbag-opener-1.4"
 
 if env.GGIFTBAG_ENABLED == false then
     return
@@ -42,7 +42,8 @@ task.spawn(function()
         REMOTE_NAME = tostring(env.GGIFTBAG_REMOTE_NAME or "GiftBag_Open"),
         ARG_MODE = string.lower(tostring(env.GGIFTBAG_ARG_MODE or "id")),
         MAX_BATCH = math.max(1, math.floor(numberSetting("GGIFTBAG_MAX_BATCH", 50))),
-        BATCH_GROW_AFTER = math.max(5, math.floor(numberSetting("GGIFTBAG_BATCH_GROW_AFTER", 25))),
+        BATCH_GROW_AFTER = math.max(5, math.floor(numberSetting("GGIFTBAG_BATCH_GROW_AFTER", 10))),
+        DRAIN_THRESHOLD = math.max(25, math.floor(numberSetting("GGIFTBAG_DRAIN_THRESHOLD", 60))),
         REMOTE_TIMEOUT = math.max(3, numberSetting("GGIFTBAG_REMOTE_TIMEOUT", 8)),
         RESOLVE_TIMEOUT = math.max(5, numberSetting("GGIFTBAG_RESOLVE_TIMEOUT", 60)),
         VERIFY_EVERY = math.max(5, math.floor(numberSetting("GGIFTBAG_VERIFY_EVERY", 20))),
@@ -77,14 +78,6 @@ task.spawn(function()
         SETTINGS.MIN_INTERVAL,
         math.min(SETTINGS.MAX_INTERVAL, SETTINGS.INTERVAL)
     )
-
-    -- Phase decorrelation: the pinata engine staggers on userId % 1009;
-    -- this module uses % 997 plus a fixed offset so open calls do not
-    -- align with consume calls on any account.
-    local fixedPhaseOffset = 0.6
-    local userPhase = ((LocalPlayer and LocalPlayer.UserId or 0) % 997)
-        / 997
-        * currentInterval
 
     local dashboard = {
         state = "Booting",
@@ -456,7 +449,7 @@ task.spawn(function()
             return bags, 0, 0
         end
 
-        local total, totalLarge = 0, 0
+        local total, totalLarge, totalNormal = 0, 0, 0
 
         for uid, entry in pairs(misc) do
             local idString = type(entry) == "table"
@@ -479,6 +472,8 @@ task.spawn(function()
 
                 if isLarge then
                     totalLarge += stack
+                else
+                    totalNormal += stack
                 end
             end
         end
@@ -491,7 +486,7 @@ task.spawn(function()
             return a.uid < b.uid
         end)
 
-        return bags, total, totalLarge
+        return bags, total, totalLarge, totalNormal
     end
 
     -- ==========================================
@@ -701,17 +696,12 @@ task.spawn(function()
     end
 
     local function gateWait()
+        -- Plain interval + per-account jitter. (An earlier version ADDED
+        -- a phase offset on top of the interval here, doubling the
+        -- average gate; phase decorrelation is not worth that cost.)
         local jitter = currentInterval * SETTINGS.JITTER_MAX
             * ((LocalPlayer and LocalPlayer.UserId or 0) % 7 / 7)
         local deadline = os.clock() + currentInterval + jitter
-        -- Offset the gate phase from the pinata consume gate.
-        local phase = (userPhase + fixedPhaseOffset) % currentInterval
-        local now = os.clock()
-        local phaseRemaining = phase - (now % currentInterval)
-
-        if phaseRemaining > 0.05 then
-            deadline += phaseRemaining
-        end
 
         while not env.STOP_GIFTBAG_OPENER do
             heartbeat("gate wait")
@@ -799,10 +789,11 @@ task.spawn(function()
     end
 
     print(string.format(
-        "[Giftbag] %s started | interval %.2fs | ladder 1/5/25/%d both types | remote %s",
+        "[Giftbag] %s started | interval %.2fs | ladder 1/5/25/%d | drain at %d+ | remote %s",
         MODULE_BUILD,
         currentInterval,
         math.min(50, SETTINGS.MAX_BATCH),
+        SETTINGS.DRAIN_THRESHOLD,
         SETTINGS.REMOTE_NAME ~= "" and SETTINGS.REMOTE_NAME or "auto"
     ))
 
@@ -859,14 +850,36 @@ task.spawn(function()
 
     local lastVerificationAt = os.clock()
 
+    -- Pending-opens ledger: the engine's save cache refreshes ~every 2s,
+    -- so bags we just opened still appear present. Subtract optimistic
+    -- opens until the cache version advances, preventing over-opens
+    -- against phantom inventory (the old rejection-cascade source).
+    local pendingNormal, pendingLarge = 0, 0
+    local lastCacheVersion = nil
+
     while not env.STOP_GIFTBAG_OPENER do
         heartbeat("main loop")
         local data = getSaveData()
 
         if data then
-            local bags, total, totalLarge = scanBags(data)
+            local bags, total, totalLarge, totalNormal = scanBags(data)
             dashboard.backlog = total
             dashboard.backlogLarge = totalLarge
+
+            local cacheEntry = env.GPINATA_SAVE_CACHE_DATA
+            local cacheVersion = type(cacheEntry) == "table"
+                and tonumber(cacheEntry.version)
+                or nil
+
+            if cacheVersion == nil or cacheVersion ~= lastCacheVersion then
+                -- Fresh data (standalone fetch, or engine cache advanced):
+                -- our optimistic decrements are now reflected in the scan.
+                pendingNormal, pendingLarge = 0, 0
+                lastCacheVersion = cacheVersion
+            end
+
+            local effectiveNormal = math.max(0, totalNormal - pendingNormal)
+            local effectiveLarge = math.max(0, totalLarge - pendingLarge)
 
             -- External consumer detection: bags vanished that we did not
             -- open. Tolerance absorbs loot/edge timing noise.
@@ -918,6 +931,11 @@ task.spawn(function()
             if total == 0 then
                 dashboard.state = "Idle"
                 task.wait(2)
+            elseif effectiveNormal + effectiveLarge == 0 then
+                -- Raw stock exists but every bag is one we already opened
+                -- (cache not refreshed yet). Short wait, do not invoke.
+                dashboard.state = "Syncing"
+                task.wait(0.5)
             else
                 dashboard.state = circuitBreakerDelay > 0 and "Circuit" or "Running"
 
@@ -925,17 +943,46 @@ task.spawn(function()
                     circuitBreakerDelay = math.max(0, circuitBreakerDelay - 1)
                     task.wait(1)
                 else
-                    local bag = bags[1]
+                    -- First type with un-opened stock (large-first order).
+                    local bag
 
+                    for _, candidate in ipairs(bags) do
+                        if (candidate.isLarge and effectiveLarge or effectiveNormal) > 0 then
+                            bag = candidate
+                            break
+                        end
+                    end
+
+                    if not bag then
+                        task.wait(0.5)
+                    else
                     if not gateWait() then
                         break
                     end
 
                     -- The remote takes (id, count) and pulls from the
-                    -- account-wide total for that id, so cap the batch at
-                    -- the type aggregate — not any single stack.
-                    local typeTotal = bag.isLarge and totalLarge or total
-                    local batch = selectBatch(bag.isLarge, typeTotal)
+                    -- account-wide total for that id. Cap at the EFFECTIVE
+                    -- per-type aggregate (raw minus our pending opens).
+                    local effectiveForType = bag.isLarge and effectiveLarge or effectiveNormal
+
+                    -- Drain mode: a real backlog (drops accumulated) jumps
+                    -- the ladder straight to the largest sanctioned rung
+                    -- that fits — matching GScript's bulk-open burst —
+                    -- instead of earning it 10 clean calls at a time.
+                    if effectiveNormal + effectiveLarge >= SETTINGS.DRAIN_THRESHOLD then
+                        local ladder = ladderFor(bag.isLarge)
+                        local bestIndex = 1
+
+                        for index, rung in ipairs(ladder) do
+                            if rung <= effectiveForType and rung <= SETTINGS.MAX_BATCH then
+                                bestIndex = index
+                            end
+                        end
+
+                        batchIndex[batchKey(bag.isLarge)] = bestIndex
+                    end
+
+                    local batch = selectBatch(bag.isLarge, effectiveForType)
 
                     local ok, response, fatal = invokeOpen(OpenEndpoint, bag, batch)
 
@@ -959,6 +1006,13 @@ task.spawn(function()
                         openedTotal += batch
                         windowOpened += batch
                         checkpointOpened += batch
+
+                        if bag.isLarge then
+                            pendingLarge += batch
+                        else
+                            pendingNormal += batch
+                        end
+
                         rejectionStreak = 0
                         consecutiveFails = 0
                         cleanStreak += 1
@@ -1053,6 +1107,7 @@ task.spawn(function()
                         )
                         task.wait(backoff)
                         OpenEndpoint = nil
+                    end
                     end
                 end
             end
