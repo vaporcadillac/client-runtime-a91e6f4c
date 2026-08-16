@@ -1,5 +1,5 @@
 local env = getgenv()
-local MODULE_BUILD = "giftbag-opener-1.0"
+local MODULE_BUILD = "giftbag-opener-1.1"
 
 if env.GGIFTBAG_ENABLED == false then
     return
@@ -39,9 +39,11 @@ task.spawn(function()
         INTERVAL = math.max(0.5, numberSetting("GGIFTBAG_INTERVAL", 1.2)),
         MIN_INTERVAL = math.max(0.5, numberSetting("GGIFTBAG_MIN_INTERVAL", 0.8)),
         MAX_INTERVAL = math.max(0.5, numberSetting("GGIFTBAG_MAX_INTERVAL", 3.0)),
-        REMOTE_NAME = tostring(env.GGIFTBAG_REMOTE_NAME or ""),
-        ARG_MODE = string.lower(tostring(env.GGIFTBAG_ARG_MODE or "uid")),
-        CONSUMES = string.lower(tostring(env.GGIFTBAG_CONSUMES or "unit")),
+        REMOTE_NAME = tostring(env.GGIFTBAG_REMOTE_NAME or "GiftBag_Open"),
+        ARG_MODE = string.lower(tostring(env.GGIFTBAG_ARG_MODE or "id")),
+        MAX_BATCH = math.max(1, math.floor(numberSetting("GGIFTBAG_MAX_BATCH", 10))),
+        BATCH_GROW_AFTER = math.max(5, math.floor(numberSetting("GGIFTBAG_BATCH_GROW_AFTER", 25))),
+        BATCH_SHRINK_ON_REJECT = math.max(1, math.floor(numberSetting("GGIFTBAG_BATCH_SHRINK_ON_REJECT", 2))),
         REMOTE_TIMEOUT = math.max(3, numberSetting("GGIFTBAG_REMOTE_TIMEOUT", 8)),
         RESOLVE_TIMEOUT = math.max(5, numberSetting("GGIFTBAG_RESOLVE_TIMEOUT", 60)),
         VERIFY_EVERY = math.max(5, math.floor(numberSetting("GGIFTBAG_VERIFY_EVERY", 20))),
@@ -413,10 +415,11 @@ task.spawn(function()
     -- BAG SCANNING
     -- ==========================================
 
+    -- BAG_IDS pinned from remote-spy capture: the server identifies bags
+    -- by exact display string ("Gift Bag" / "Large Gift Bag") passed as
+    -- the first argument to GiftBag_Open.
     local BAG_IDS = {
-        [normalize("Giftbag")] = false,
         [normalize("Gift Bag")] = false,
-        [normalize("Large Giftbag")] = true,
         [normalize("Large Gift Bag")] = true,
     }
 
@@ -457,9 +460,7 @@ task.spawn(function()
 
             if BAG_IDS[key] ~= nil then
                 local isLarge = BAG_IDS[key]
-                local stack = SETTINGS.CONSUMES == "stack"
-                    and 1
-                    or entryAmount(entry)
+                local stack = entryAmount(entry)
 
                 table.insert(bags, {
                     uid = tostring(uid),
@@ -501,12 +502,9 @@ task.spawn(function()
         end
 
         for _, alias in ipairs({
-            "Use Giftbag",
-            "Use_Giftbag",
-            "Giftbag Use",
-            "Open Giftbag",
-            "Giftbag Open",
-            "Use Gift",
+            "GiftBag_Open",
+            "Gift Bag Open",
+            "Open Gift Bag",
         }) do
             table.insert(aliases, alias)
         end
@@ -613,6 +611,8 @@ task.spawn(function()
     local circuitBreakerDelay = 0
     local circuitTrips = 0
     local cleanStreak = 0
+    local currentBatch = 1
+    local cleanSinceBatchGrow = 0
     local externalWarned = false
     local windowOpened = 0
     local windowStartedAt = os.clock()
@@ -665,18 +665,21 @@ task.spawn(function()
         return false
     end
 
-    local function invokeOpen(endpoint, bag)
+    local function invokeOpen(endpoint, bag, count)
         heartbeat("remote invocation")
-        local arg = SETTINGS.ARG_MODE == "id" and bag.id or bag.uid
+        -- Server contract (remote-spy confirmed): GiftBag_Open(id, count).
+        local args = SETTINGS.ARG_MODE == "uid" and { bag.uid, count } or { bag.id, count }
 
         if endpoint.kind == "event" then
-            local ok = pcall(endpoint.remote.FireServer, endpoint.remote, arg)
+            local ok = pcall(endpoint.remote.FireServer, endpoint.remote, table.unpack(args))
             return ok, ok and nil or "fire failed", false
         end
 
         local completed, callOk, callResult = false, false, nil
         local thread = task.spawn(function()
-            local ok, result = pcall(endpoint.remote.InvokeServer, endpoint.remote, arg)
+            local ok, result = pcall(function()
+                return endpoint.remote:InvokeServer(table.unpack(args))
+            end)
             callOk, callResult = ok, result
             completed = true
         end)
@@ -734,10 +737,11 @@ task.spawn(function()
     end
 
     print(string.format(
-        "[Giftbag] %s started | interval %.2fs | auto-remote %s",
+        "[Giftbag] %s started | interval %.2fs | batch 1-%d | remote %s",
         MODULE_BUILD,
         currentInterval,
-        tostring(SETTINGS.AUTO_REMOTE)
+        SETTINGS.MAX_BATCH,
+        SETTINGS.REMOTE_NAME ~= "" and SETTINGS.REMOTE_NAME or "auto"
     ))
 
     sendWebhook({
@@ -865,7 +869,11 @@ task.spawn(function()
                         break
                     end
 
-                    local ok, response, fatal = invokeOpen(OpenEndpoint, bag)
+                    -- Adaptive batch: start conservative, grow toward
+                    -- MAX_BATCH on clean responses, shrink on refusal.
+                    local batch = math.min(currentBatch, bag.stack)
+
+                    local ok, response, fatal = invokeOpen(OpenEndpoint, bag, batch)
 
                     if fatal then
                         sendWebhook({
@@ -884,17 +892,29 @@ task.spawn(function()
 
                     if ok and (response == nil or response == true or response == 1) then
                         -- Optimistic path
-                        openedTotal += 1
-                        windowOpened += 1
-                        checkpointOpened += 1
-                        bag.stack -= 1
+                        openedTotal += batch
+                        windowOpened += batch
+                        checkpointOpened += batch
+                        bag.stack -= batch
                         rejectionStreak = 0
                         consecutiveFails = 0
                         cleanStreak += 1
-                        optimisticStreak += 1
+                        cleanSinceBatchGrow += 1
+                        optimisticStreak += batch
 
                         if bag.isLarge then
-                            openedLargeTotal += 1
+                            openedLargeTotal += batch
+                        end
+
+                        if cleanSinceBatchGrow >= SETTINGS.BATCH_GROW_AFTER
+                            and currentBatch < SETTINGS.MAX_BATCH
+                        then
+                            cleanSinceBatchGrow = 0
+                            currentBatch = math.min(SETTINGS.MAX_BATCH, currentBatch + 1)
+
+                            if SETTINGS.VERBOSE then
+                                print(string.format("[Giftbag] Batch -> %d", currentBatch))
+                            end
                         end
 
                         dashboard.opened = openedTotal
@@ -917,6 +937,13 @@ task.spawn(function()
                         dashboard.rejected = rejectedTotal
                         rejectionStreak += 1
                         cleanStreak = 0
+                        cleanSinceBatchGrow = 0
+
+                        -- A refused batch likely exceeded what the server
+                        -- will grant per call; halve before retrying.
+                        if batch > 1 then
+                            currentBatch = math.max(1, math.ceil(batch / SETTINGS.BATCH_SHRINK_ON_REJECT))
+                        end
 
                         if rejectionStreak >= SETTINGS.CIRCUIT_AFTER then
                             circuitTrips += 1
@@ -1021,6 +1048,7 @@ task.spawn(function()
             backlog = dashboard.backlog,
             backlogLarge = dashboard.backlogLarge,
             interval = currentInterval,
+            batch = currentBatch,
             openedSession = openedTotal,
             openedLargeSession = openedLargeTotal,
             rejectedSession = rejectedTotal,
