@@ -1,5 +1,5 @@
 local env = getgenv()
-local MODULE_BUILD = "giftbag-opener-1.2"
+local MODULE_BUILD = "giftbag-opener-1.3"
 
 if env.GGIFTBAG_ENABLED == false then
     return
@@ -422,12 +422,12 @@ task.spawn(function()
         [normalize("Large Gift Bag")] = true,
     }
 
-    -- UI-sanctioned open denominations (remote-spy confirmed the client
-    -- only ever sends these counts). The server most likely validates
-    -- against this set, so the opener's batch ladder steps through
-    -- sanctioned values only — never synthesized counts like 3 or 25.
-    local NORMAL_BATCHES = { 1, 5, 10, 50 }
-    local LARGE_BATCHES = { 1, 5, 10 }
+    -- UI-sanctioned open denominations, identical for both bag types
+    -- (in-game UI confirmed: 1, 5, 25, 50, lock — lock is an inventory
+    -- toggle, not a count). The opener's batch ladder steps through
+    -- these values only, never synthesized counts like 3 or 10.
+    local NORMAL_BATCHES = { 1, 5, 25, 50 }
+    local LARGE_BATCHES = { 1, 5, 25, 50 }
 
     local function entryAmount(entry)
         if type(entry) ~= "table" then
@@ -799,7 +799,7 @@ task.spawn(function()
     end
 
     print(string.format(
-        "[Giftbag] %s started | interval %.2fs | normal ladder 1/5/10/%d | large ladder 1/5/10 | remote %s",
+        "[Giftbag] %s started | interval %.2fs | ladder 1/5/25/%d both types | remote %s",
         MODULE_BUILD,
         currentInterval,
         math.min(50, SETTINGS.MAX_BATCH),
