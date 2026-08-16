@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.0"
+local ENGINE_BUILD = "hyperflow-2.1"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -37,23 +37,39 @@ local function startFleetLedger()
             end)
 
             if downloadOk and type(source) == "string" and #source > 0 then
-                local chunk, compileError = loadstring(source)
+                -- Build pin: refuse to execute a ledger that does not
+                -- declare the expected LEDGER_BUILD. A bad deploy on the
+                -- repo can no longer push arbitrary code into clients.
+                local expectedBuild = tostring(
+                    env.GLEDGER_REQUIRED_BUILD or "fleet-ledger-1.4"
+                )
 
-                if chunk then
-                    local runtimeOk, runtimeError = pcall(chunk)
-                    env.__FLEET_PROFIT_LEDGER_LOADING = false
+                if string.find(
+                    source,
+                    'LEDGER_BUILD = "' .. expectedBuild,
+                    1,
+                    true
+                ) == nil then
+                    lastError = "build marker mismatch (expected " .. expectedBuild .. ")"
+                else
+                    local chunk, compileError = loadstring(source)
 
-                    if not runtimeOk then
-                        warn(
-                            "[LedgerBootstrap] Startup failed: "
-                                .. tostring(runtimeError)
-                        )
+                    if chunk then
+                        local runtimeOk, runtimeError = pcall(chunk)
+                        env.__FLEET_PROFIT_LEDGER_LOADING = false
+
+                        if not runtimeOk then
+                            warn(
+                                "[LedgerBootstrap] Startup failed: "
+                                    .. tostring(runtimeError)
+                            )
+                        end
+
+                        return
                     end
 
-                    return
+                    lastError = tostring(compileError)
                 end
-
-                lastError = tostring(compileError)
             else
                 lastError = tostring(source)
             end
@@ -456,6 +472,12 @@ task.spawn(function()
         end)
     end
 
+    local alertLastSentAt = {}
+    local alertMinGapSeconds = math.max(
+        0,
+        numberSetting("GPINATA_WEBHOOK_ALERT_MIN_GAP", 60)
+    )
+
     local function sendWebhook(options)
         if not webhookEnabled then
             return
@@ -464,7 +486,18 @@ task.spawn(function()
         options = options or {}
 
         if options.periodic ~= true then
-            return
+            -- Non-periodic alerts are rate-limited per title instead of
+            -- dropped, so a flapping circuit breaker cannot flood the
+            -- webhook while genuine alerts still get through.
+            local title = tostring(options.title or "")
+            local now = os.clock()
+            local lastSentAt = tonumber(alertLastSentAt[title]) or 0
+
+            if alertMinGapSeconds > 0 and now - lastSentAt < alertMinGapSeconds then
+                return
+            end
+
+            alertLastSentAt[title] = now
         end
 
         local fields = {}
@@ -582,7 +615,7 @@ task.spawn(function()
         heartbeat("engine initialization")
 
         local SETTINGS = {
-            -- AGGRESSIVE 5.5s FLOOR PROBE
+            -- Placement interval; adaptive controller tunes within MIN/MAX bounds.
             INTERVAL = math.max(1.5, numberSetting("GPINATA_INTERVAL", 5.0)),
             ADAPTIVE = env.GPINATA_ADAPTIVE ~= false,
             ADAPTIVE_MIN_INTERVAL = math.max(
@@ -658,11 +691,6 @@ task.spawn(function()
                 numberSetting("GPINATA_ISOLATED_FAILURE_STEP", 0.10)
             ),
             CONFIRM_WAIT = math.max(0.25, numberSetting("GPINATA_CONFIRM_WAIT", 1.5)),
-            RETRY_DELAY = math.max(0.25, numberSetting("GPINATA_RETRY_DELAY", 1)),
-            RECOVERY_RETRY_DELAY = math.max(
-                0.5,
-                numberSetting("GPINATA_RECOVERY_RETRY_DELAY", 2)
-            ),
             MAX_RETRIES = math.min(
                 2,
                 math.max(0, math.floor(numberSetting("GPINATA_MAX_RETRIES", 2)))
@@ -689,7 +717,6 @@ task.spawn(function()
                 numberSetting("GPINATA_FARM_WAIT_TIMEOUT", 600)
             ),
             STAGGER = env.GPINATA_STAGGER ~= false,
-            CONFIRM_POLL = 0.05,
             POSITION_RADIUS = 8,
             FARM_CHECK_INTERVAL = 2,
             INVENTORY_TIMEOUT = 30,
@@ -772,6 +799,17 @@ task.spawn(function()
             math.min(SETTINGS.ADAPTIVE_MAX_INTERVAL, SETTINGS.INTERVAL)
         )
 
+        local initialFpsCap = nil
+
+        if type(getfpscap) == "function" then
+            local ok, value = pcall(getfpscap)
+            if ok and type(value) == "number" and value > 0 then
+                initialFpsCap = value
+            end
+        end
+
+        local fpsCapApplied = false
+
         local function applyFpsCap(fps)
             if type(setfpscap) ~= "function" then
                 return
@@ -779,10 +817,23 @@ task.spawn(function()
 
             local ok, err = pcall(setfpscap, fps or SETTINGS.FPS)
 
-            if not ok then
+            if ok then
+                fpsCapApplied = true
+            else
                 warn("[Runtime] FPS cap failed: " .. tostring(err))
             end
         end
+
+        local function restoreFpsCap()
+            if not fpsCapApplied or type(setfpscap) ~= "function" then
+                return
+            end
+
+            pcall(setfpscap, initialFpsCap or 60)
+            fpsCapApplied = false
+        end
+
+        env.__GPINATA_RESTORE_FPSCAP = restoreFpsCap
 
         local function waitUntil(deadline)
             -- At a 10 FPS cap each task.wait rounds up to a ~100ms frame,
@@ -861,10 +912,10 @@ task.spawn(function()
             engineBuild = ENGINE_BUILD,
         }
         local calibrationPersistent = SETTINGS.CALIBRATION
-        local calibrationLoadedRemembered = false
             and SETTINGS.CALIBRATION_PERSIST
             and readCalibrationFile ~= nil
             and writeCalibrationFile ~= nil
+        local calibrationLoadedRemembered = false
 
         local function loadCalibrationProfile()
             if not calibrationPersistent then
@@ -1516,6 +1567,9 @@ task.spawn(function()
             end)
 
             if not ok or type(serverNow) ~= "number" then
+                if SETTINGS.VERBOSE then
+                    warn("[Runtime] Server time unavailable; skipping account stagger.")
+                end
                 return true
             end
 
@@ -1637,8 +1691,10 @@ task.spawn(function()
                             and characterRoot
                             and touchPart:FindFirstChildWhichIsA("TouchTransmitter", true)
                         then
-                            pcall(firetouchinterest, characterRoot, touchPart, 0)
-                            pcall(firetouchinterest, characterRoot, touchPart, 1)
+                            if type(firetouchinterest) == "function" then
+                                pcall(firetouchinterest, characterRoot, touchPart, 0)
+                                pcall(firetouchinterest, characterRoot, touchPart, 1)
+                            end
                         end
                     end
                 end
@@ -1825,23 +1881,30 @@ task.spawn(function()
             end
         end)
 
+        local function announceNoItems(consoleLine, webhookDescription)
+            print(consoleLine)
+            dashboard.state = "Stopped"
+            dashboard.pinatas = 0
+            sendWebhook({
+                title = "No Mini Pinatas Available",
+                description = webhookDescription,
+                color = 16753920,
+                targetZone = SETTINGS.TARGET_ZONE,
+                fields = {
+                    webhookField("Inventory Remaining", "0", true),
+                    webhookField("Placement State", "Stopped", true),
+                },
+            })
+            return "no_items"
+        end
+
         local initialUid, initialTotal, inventoryReady = waitForInventory()
         if not initialUid then
             if inventoryReady then
-                print("[Runtime] No Mini Pinatas were found; engine stopped cleanly.")
-                dashboard.state = "Stopped"
-                dashboard.pinatas = 0
-                sendWebhook({
-                    title = "No Mini Pinatas Available",
-                    description = "The engine stopped cleanly because this account had no Mini Pinatas when inventory became available.",
-                    color = 16753920,
-                    targetZone = SETTINGS.TARGET_ZONE,
-                    fields = {
-                        webhookField("Inventory Remaining", "0", true),
-                        webhookField("Placement State", "Stopped", true),
-                    },
-                })
-                return "no_items"
+                return announceNoItems(
+                    "[Runtime] No Mini Pinatas were found; engine stopped cleanly.",
+                    "The engine stopped cleanly because this account had no Mini Pinatas when inventory became available."
+                )
             end
             error("[Runtime] Inventory did not become available.")
         end
@@ -1851,20 +1914,10 @@ task.spawn(function()
         initialUid, initialTotal, inventoryReady = waitForInventory()
         if not initialUid then
             if inventoryReady then
-                print("[Runtime] No Mini Pinatas remain; engine stopped cleanly.")
-                dashboard.state = "Stopped"
-                dashboard.pinatas = 0
-                sendWebhook({
-                    title = "No Mini Pinatas Available",
-                    description = "The engine stopped cleanly because the inventory contained no Mini Pinatas after farming began.",
-                    color = 16753920,
-                    targetZone = SETTINGS.TARGET_ZONE,
-                    fields = {
-                        webhookField("Inventory Remaining", "0", true),
-                        webhookField("Placement State", "Stopped", true),
-                    },
-                })
-                return "no_items"
+                return announceNoItems(
+                    "[Runtime] No Mini Pinatas remain; engine stopped cleanly.",
+                    "The engine stopped cleanly because the inventory contained no Mini Pinatas after farming began."
+                )
             end
             error("[Runtime] Inventory was unavailable after farming began.")
         end
@@ -1887,9 +1940,9 @@ task.spawn(function()
         end
 
         if SETTINGS.ADAPTIVE then
-            print(string.format("[Runtime] Started | target %.2fs | adaptive %.2f-%.2fs | retries %.2f/%.2fs | amount %d", currentInterval, SETTINGS.ADAPTIVE_MIN_INTERVAL, SETTINGS.ADAPTIVE_MAX_INTERVAL, SETTINGS.RETRY_DELAY, SETTINGS.RECOVERY_RETRY_DELAY, initialTotal))
+            print(string.format("[Runtime] Started | target %.2fs | adaptive %.2f-%.2fs | amount %d", currentInterval, SETTINGS.ADAPTIVE_MIN_INTERVAL, SETTINGS.ADAPTIVE_MAX_INTERVAL, initialTotal))
         else
-            print(string.format("[Runtime] Started | interval %.2fs | retries %.2f/%.2fs | amount %d", currentInterval, SETTINGS.RETRY_DELAY, SETTINGS.RECOVERY_RETRY_DELAY, initialTotal))
+            print(string.format("[Runtime] Started | interval %.2fs | amount %d", currentInterval, initialTotal))
         end
 
         local placementRunStartedAt = os.clock()
@@ -2233,6 +2286,7 @@ task.spawn(function()
                 local windowPinatasUsed = math.max(0, (reportSnapshot.pinatas or lastKnownTotal) - lastKnownTotal)
                 local initialAccepted = math.max(0, cycles - recoveredCycles - failedCycles)
                 local initialPassRate = cycles > 0 and initialAccepted / cycles * 100 or 0
+                local reportCadenceMinutes = SETTINGS.WEBHOOK_STATUS_SECONDS / 60
                 sendWebhook({
                     periodic = true,
                     title = "3-Hour Placement Update",
@@ -2240,13 +2294,13 @@ task.spawn(function()
                     color = windowFailed == 0 and (windowCycles == 0 or windowRecovered / windowCycles * 100 < 5) and 3447003 or 16753920,
                     targetZone = SETTINGS.TARGET_ZONE,
                     fields = {
-                        webhookField("📊 Last 35 Minutes", string.format("**%s/%s confirmed** — %.2f%%\n**%.1f/hour observed** • Calls: %s • Efficiency: %.2f%%\nGems: **%s** • Piñatas used: **%s**\nRecovered: %s • Rejections: %s • Failed: %s\nWindow: %s • Circuit downtime: %s", formatInteger(windowConfirmed), formatInteger(windowCycles), windowSuccessRate, windowPerHour, formatInteger(windowCalls), windowCallEfficiency, windowGemText, formatInteger(windowPinatasUsed), formatInteger(windowRecovered), formatInteger(windowRejected), formatInteger(windowFailed), formatDuration(windowElapsed), formatDuration(windowCircuitDowntime)), false),
+                        webhookField(string.format("📊 Last %g Minutes", reportCadenceMinutes), string.format("**%s/%s confirmed** — %.2f%%\n**%.1f/hour observed** • Calls: %s • Efficiency: %.2f%%\nGems: **%s** • Piñatas used: **%s**\nRecovered: %s • Rejections: %s • Failed: %s\nWindow: %s • Circuit downtime: %s", formatInteger(windowConfirmed), formatInteger(windowCycles), windowSuccessRate, windowPerHour, formatInteger(windowCalls), windowCallEfficiency, windowGemText, formatInteger(windowPinatasUsed), formatInteger(windowRecovered), formatInteger(windowRejected), formatInteger(windowFailed), formatDuration(windowElapsed), formatDuration(windowCircuitDowntime)), false),
                         webhookField("⚡ Placement Performance", string.format("**%s/%s confirmed** — %.2f%%\n**%.1f/hour** — %.0f/day\nCurrent interval: **%.2fs**\nCycle overhead: gate **%.0fms** • invoke **%.0fms** • post **%.0fms**", formatInteger(confirmed), formatInteger(cycles), successRate, acceptedPerHour, projectedPerDay, currentInterval, phaseStats.gateOvershootMs, phaseStats.invokeLatencyMs, phaseStats.postConfirmMs), false),
                         webhookField("🛡️ Consistency", string.format("First-pass acceptance: **%.2f%%**\nCall efficiency: **%.2f%%**\nRejections: %s • Failed cycles: %s", initialPassRate, callEfficiency, formatInteger(rejected), formatInteger(failedCycles)), false),
                         webhookField("🔁 Recovery", string.format("Recovered: %s (%.2f%%)\nRetry 1: %s • Retry 2: %s • Late: %s", formatInteger(recoveredCycles), recoveryRate, formatInteger(firstRetryRecoveries), formatInteger(secondRetryRecoveries), formatInteger(lateConfirmations)), false),
                         webhookField("🧠 Account Calibration", tostring(dashboard.calibration) .. "\nCircuit: " .. (circuitBreakerActive and string.format("ACTIVE — %.0fs probe", circuitBreakerDelay) or "inactive") .. " • Trips: " .. formatInteger(circuitBreakerTrips), false),
                         webhookField("📡 Communication Health", string.format("%s\nCalls: %s • Errors: %s • Timeouts: %s\nWindow errors: %s • Window timeouts: %s\nLast response: `%s`", tostring(dashboard.remote), formatInteger(remoteCalls), formatInteger(errors), formatInteger(timeouts), formatInteger(windowErrors), formatInteger(windowTimeouts), tostring(lastResponse)), false),
-                        webhookField("🕒 Run Snapshot", string.format("Remaining supply: %s\nCompleted cycles: %s\nEngine restarts this session: %s\nNext scheduled update: 35 minutes", formatInteger(lastKnownTotal), formatInteger(cycles), tostring(rejoinsThisSession)), false),
+                        webhookField("🕒 Run Snapshot", string.format("Remaining supply: %s\nCompleted cycles: %s\nEngine restarts this session: %s\nNext scheduled update: %g minutes", formatInteger(lastKnownTotal), formatInteger(cycles), tostring(rejoinsThisSession), reportCadenceMinutes), false),
                     },
                 })
                 lastReportAt = now
@@ -2689,10 +2743,24 @@ task.spawn(function()
                 end
 
                 if ok and response == true then
-                    -- Optimistic confirmation skip
+                    -- Optimistic confirmation skip. Bounded drift guard:
+                    -- every 25th optimistic confirmation re-reads the real
+                    -- inventory total, so a server that consumes a
+                    -- different amount cannot silently desync the cache.
                     didConfirm = true
                     amountUsed = 1
                     totalAfter = math.max(0, totalBefore - 1)
+                    saveCache.optimisticStreak = (saveCache.optimisticStreak or 0) + 1
+
+                    if saveCache.optimisticStreak >= 25 then
+                        saveCache.optimisticStreak = 0
+                        local verifiedTotal = getReliableTotal()
+
+                        if type(verifiedTotal) == "number" and verifiedTotal >= 0 then
+                            totalAfter = verifiedTotal
+                        end
+                    end
+
                     saveCache.total = totalAfter
                 elseif ok and response ~= false then
                     didConfirm, amountUsed, totalAfter = waitForConfirmation(totalBefore)
@@ -2914,6 +2982,11 @@ task.spawn(function()
         if not supervisorWait(restartDelay) then break end
         dashboard.state = "Booting"
         if runDuration < 300 then restartDelay = math.min(restartDelay * 2, restartDelayMax) end
+    end
+
+    if type(env.__GPINATA_RESTORE_FPSCAP) == "function" then
+        pcall(env.__GPINATA_RESTORE_FPSCAP)
+        env.__GPINATA_RESTORE_FPSCAP = nil
     end
 
     if cancellationFailed then
