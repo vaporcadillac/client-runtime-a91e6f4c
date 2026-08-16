@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.1"
+local ENGINE_BUILD = "hyperflow-2.2"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -631,8 +631,8 @@ task.spawn(function()
                 math.floor(numberSetting("GPINATA_ADAPTIVE_WINDOW", 20))
             ),
             ADAPTIVE_LONG_WINDOW = math.max(
-                300,
-                math.floor(numberSetting("GPINATA_ADAPTIVE_LONG_WINDOW", 300))
+                150,
+                math.floor(numberSetting("GPINATA_ADAPTIVE_LONG_WINDOW", 150))
             ),
             ADAPTIVE_STEP_DOWN = math.max(
                 0.01,
@@ -651,8 +651,8 @@ task.spawn(function()
                 numberSetting("GPINATA_ADAPTIVE_PRESSURE_STEP", 0.10)
             ),
             ADAPTIVE_RECOVERY_HOLD = math.max(
-                2700,
-                numberSetting("GPINATA_ADAPTIVE_RECOVERY_HOLD", 2700)
+                1200,
+                numberSetting("GPINATA_ADAPTIVE_RECOVERY_HOLD", 1200)
             ),
             ADAPTIVE_FAILURE_HOLD = math.max(
                 3600,
@@ -755,15 +755,23 @@ task.spawn(function()
                 0,
                 math.min(1, numberSetting("GPINATA_PACING_JITTER_MAX", 0.15))
             ),
+            -- 2.2 hold-at-target: once the engine confirms at this
+            -- interval it stops probing downward and holds, instead of
+            -- chasing the floor. 24/7 fleets trade the last ~5% pace for
+            -- far less limit-riding and rate-heuristic exposure.
+            TARGET_INTERVAL = math.max(
+                1.5,
+                numberSetting("GPINATA_TARGET_INTERVAL", 5.8)
+            ),
             CALIBRATION = env.GPINATA_CALIBRATION ~= false,
             CALIBRATION_PERSIST = env.GPINATA_CALIBRATION_PERSIST ~= false,
             CALIBRATION_MIN_CYCLES = math.max(
-                300,
-                math.floor(numberSetting("GPINATA_CALIBRATION_MIN_CYCLES", 300))
+                180,
+                math.floor(numberSetting("GPINATA_CALIBRATION_MIN_CYCLES", 180))
             ),
             CALIBRATION_MIN_SECONDS = math.max(
-                2700,
-                numberSetting("GPINATA_CALIBRATION_MIN_SECONDS", 2700)
+                1500,
+                numberSetting("GPINATA_CALIBRATION_MIN_SECONDS", 1500)
             ),
             CALIBRATION_MAX_REJECT_RATE = math.min(
                 0.015,
@@ -2410,7 +2418,7 @@ task.spawn(function()
             local cumulativeSuccessRate = cycles > 0 and confirmed / cycles * 100 or 0
             sendWebhook({
                 title = slowedDown and "Adaptive Rate Slowed" or "Adaptive Rate Recovered",
-                description = slowedDown and "The consistency controller found repeated pacing evidence and made one protective interval change. Quarantined zone failures cannot directly force a speed change." or string.format("%d clean evidence cycles plus the recovery lock allowed one cautious step toward the %.2f-second target.", SETTINGS.ADAPTIVE_LONG_WINDOW, SETTINGS.ADAPTIVE_MIN_INTERVAL),
+                description = slowedDown and "The consistency controller found repeated pacing evidence and made one protective interval change. Quarantined zone failures cannot directly force a speed change." or string.format("%d clean evidence cycles plus the recovery lock allowed one cautious step toward the %.2f-second target.", SETTINGS.ADAPTIVE_LONG_WINDOW, SETTINGS.TARGET_INTERVAL),
                 color = slowedDown and 16753920 or 5763719,
                 targetZone = SETTINGS.TARGET_ZONE,
                 fields = {
@@ -2430,9 +2438,17 @@ task.spawn(function()
                     webhookField("Allowed Range", string.format("%.2f-%.2f seconds", SETTINGS.ADAPTIVE_MIN_INTERVAL, SETTINGS.ADAPTIVE_MAX_INTERVAL), true),
                 },
             })
-            clearAdaptiveHistory()
             resetAdaptiveWindow()
             isolatedFailureMarks = {}
+
+            -- 2.2: evidence accumulates across speed-up steps. Wiping
+            -- history on every -0.05s step reset the qualification race
+            -- and made recovery take (steps x long-window) instead of
+            -- one long-window. Pressure (slow-down) events still wipe.
+            if slowedDown then
+                clearAdaptiveHistory()
+            end
+
             return true
         end
 
@@ -2521,13 +2537,18 @@ task.spawn(function()
                 and historyRejectRate <= SETTINGS.ADAPTIVE_RECOVERY_MAX_REJECT_RATE
             local recoveryHoldComplete = now >= adaptiveRecoveryNotBefore
             local zoneHealthy = zoneHealthRemaining() <= 0
+            -- 2.2 hold-at-target: stop probing downward once the engine
+            -- confirms at TARGET_INTERVAL. The floor exists for
+            -- slow-down recovery overflow, not for pace-chasing.
+            local aboveTarget = currentInterval - SETTINGS.TARGET_INTERVAL > 0.001
             if rejectRate < SETTINGS.ADAPTIVE_HIGH_REJECT_RATE
                 and currentInterval > SETTINGS.ADAPTIVE_MIN_INTERVAL
+                and aboveTarget
                 and recoveryEvidenceClean
                 and recoveryHoldComplete
                 and zoneHealthy
             then
-                if applyAdaptiveIntervalChange(currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN, "long-window stable recovery", evidence, SETTINGS.ADAPTIVE_RECOVERY_HOLD) then return end
+                if applyAdaptiveIntervalChange(math.max(SETTINGS.TARGET_INTERVAL, currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN), "long-window stable recovery", evidence, SETTINGS.ADAPTIVE_RECOVERY_HOLD) then return end
             end
             resetAdaptiveWindow()
         end
