@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.3.3"
+local ENGINE_BUILD = "hyperflow-2.4"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -675,6 +675,14 @@ task.spawn(function()
                 1200,
                 numberSetting("GPINATA_ADAPTIVE_RECOVERY_HOLD", 1200)
             ),
+            -- 2.4: speed-up steps no longer pay the full recovery hold.
+            -- The evidence window (150 clean cycles) is itself the
+            -- stability proof; stacking a 20-min hold on every -0.05s
+            -- step made post-relaunch re-earning take hours.
+            ADAPTIVE_SPEEDUP_HOLD = math.max(
+                60,
+                numberSetting("GPINATA_ADAPTIVE_SPEEDUP_HOLD", 300)
+            ),
             ADAPTIVE_FAILURE_HOLD = math.max(
                 3600,
                 numberSetting("GPINATA_ADAPTIVE_FAILURE_HOLD", 3600)
@@ -1026,6 +1034,25 @@ task.spawn(function()
                 currentInterval,
                 calibrationProfile.recommendedInterval
             )
+            -- 2.4 warm boot: a non-provisional profile with a fully
+            -- qualified best interval boots THERE, skipping the climb
+            -- down from the last protective save. Zone-floor logic
+            -- below can still raise it for stricter zones, and
+            -- anti-drift demotion covers a server that tightened.
+            local bestQualified = tonumber(calibrationProfile.bestQualifiedInterval)
+
+            if bestQualified
+                and not calibrationProfile.provisional
+                and versionMatches
+                and bestQualified < currentInterval
+                and bestQualified >= SETTINGS.ADAPTIVE_MIN_INTERVAL
+            then
+                currentInterval = bestQualified
+                dashboard.calibration = string.format(
+                    "Warm boot • best-qualified %.2fs",
+                    bestQualified
+                )
+            end
             -- v2.0 anti-drift: flag that this run started from a
             -- remembered interval, so early rejections on a stricter
             -- server can demote it (see updateAdaptiveRate).
@@ -2203,6 +2230,13 @@ task.spawn(function()
             if not qualifies then return end
             calibrationSegmentQualified = true
             calibrationProfile.recommendedInterval = currentInterval
+            -- 2.4: track the FASTEST interval ever fully qualified on
+            -- this profile. Relaunches boot here directly instead of
+            -- the last (slower) protective save, eliminating the
+            -- post-relaunch re-earning climb. Anti-drift still guards:
+            -- a stricter server demotes this within the early window.
+            local bestQualified = tonumber(calibrationProfile.bestQualifiedInterval)
+            calibrationProfile.bestQualifiedInterval = math.min(bestQualified or math.huge, currentInterval)
             rememberZoneInterval(SETTINGS.TARGET_ZONE, currentInterval)
             calibrationProfile.qualifiedCycles = calibrationSegmentCycles
             calibrationProfile.qualifiedSeconds = math.floor(elapsed)
@@ -2486,7 +2520,13 @@ task.spawn(function()
             currentInterval = math.max(SETTINGS.ADAPTIVE_MIN_INTERVAL, math.min(SETTINGS.ADAPTIVE_MAX_INTERVAL, math.floor(requestedInterval * 100 + 0.5) / 100))
             if math.abs(currentInterval - previousInterval) < 0.001 then return false end
             evidence = evidence or {}
-            holdSeconds = math.max(tonumber(holdSeconds) or SETTINGS.ADAPTIVE_RECOVERY_HOLD, SETTINGS.ADAPTIVE_RECOVERY_HOLD)
+            local defaultHold = slowedDown
+                and SETTINGS.ADAPTIVE_RECOVERY_HOLD
+                or SETTINGS.ADAPTIVE_SPEEDUP_HOLD
+            local minimumHold = slowedDown
+                and SETTINGS.ADAPTIVE_RECOVERY_HOLD
+                or 60
+            holdSeconds = math.max(tonumber(holdSeconds) or defaultHold, minimumHold)
             local now = os.clock()
             local slowedDown = currentInterval > previousInterval
             dashboard.interval = currentInterval
