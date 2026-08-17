@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.3.2"
+local ENGINE_BUILD = "hyperflow-2.3.3"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -1766,6 +1766,43 @@ task.spawn(function()
 
             for _, connection in ipairs(connections) do
                 pcall(connection.Disconnect, connection)
+            end
+        end)
+
+        -- ==========================================
+        -- SCHEDULED HEAP SWEEP
+        -- Piñata churn (models, orbs, FX — thousands of instance
+        -- create/destroy cycles per hour) litters the Luau heap, and
+        -- at a 5 FPS cap the GC's frame-scheduled steps are lazy, so
+        -- garbage squats between collections and the working set
+        -- climbs. A 10-minute full sweep keeps residence short.
+        -- Generation-scoped: dies with the engine incarnation, same
+        -- as the hijack and cache-monitor loops.
+        -- ==========================================
+        task.spawn(function()
+            while not env.STOP_MINI_PINATA_FAST_PLACER
+                and env.__GPINATA_ENGINE_GENERATION == engineGeneration
+            do
+                task.wait(600)
+
+                if env.STOP_MINI_PINATA_FAST_PLACER
+                    or env.__GPINATA_ENGINE_GENERATION ~= engineGeneration
+                then
+                    break
+                end
+
+                local swept = false
+
+                if type(gc2) == "function" then
+                    swept = pcall(gc2)
+                elseif type(collectgarbage) == "function" then
+                    pcall(collectgarbage, "collect")
+                    swept = true
+                end
+
+                if swept and SETTINGS.VERBOSE then
+                    print("[Runtime] Heap sweep complete.")
+                end
             end
         end)
 
