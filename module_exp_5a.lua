@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.4.1"
+local ENGINE_BUILD = "hyperflow-2.5"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -877,26 +877,32 @@ task.spawn(function()
         env.__GPINATA_RESTORE_FPSCAP = restoreFpsCap
 
         local function waitUntil(deadline)
-            -- At a 10 FPS cap each task.wait rounds up to a ~100ms frame,
-            -- so the final approach ramps FPS for ~16ms scheduling
-            -- granularity instead of overshooting the deadline.
-            local fpsRamped = false
+            -- At a 5 FPS cap each task.wait rounds up to a ~200ms frame.
+            -- 2.5: two-stage ramp — engage early enough (1.2s out) that
+            -- the 30fps stage is guaranteed live before the final
+            -- approach, then 60fps for the last 300ms for ~16ms gate
+            -- precision. Overshoot was the single largest hidden cycle
+            -- cost at low idle caps.
+            local stage = 0
 
             while not env.STOP_MINI_PINATA_FAST_PLACER do
                 heartbeat("scheduled interval wait")
                 local remaining = deadline - os.clock()
 
                 if remaining <= 0 then
-                    if fpsRamped then
+                    if stage > 0 then
                         applyFpsCap()
                     end
 
                     return true
                 end
 
-                if remaining <= 0.75 and not fpsRamped then
-                    fpsRamped = true
+                if remaining <= 0.3 and stage < 2 then
+                    stage = 2
                     applyFpsCap(60)
+                elseif remaining <= 1.2 and stage < 1 then
+                    stage = 1
+                    applyFpsCap(30)
                 end
 
                 task.wait(math.max(0.03, math.min(0.25, remaining)))
@@ -1978,7 +1984,11 @@ task.spawn(function()
 
         local function waitForConfirmation(totalBefore)
             local deadline = os.clock() + SETTINGS.CONFIRM_WAIT
-            local pollDelays = { 0.05, 0.05, 0.1, 0.2, 0.4, 0.4, 0.25 }
+            -- 2.5: immediate first poll before any delay — the engine's
+            -- 2s cache refresher often already reflects the consume by
+            -- the time the invoke returns, so the old 0.05s entry delay
+            -- was pure tail latency on the optimistic path.
+            local pollDelays = { 0.0, 0.05, 0.05, 0.1, 0.2, 0.4, 0.4, 0.25 }
             local pollIndex = 1
             repeat
                 heartbeat("inventory confirmation wait")
@@ -2917,8 +2927,11 @@ task.spawn(function()
                 -- jitter. This removes cycle-start scheduling overhead
                 -- (farm check, cache read, task.wait frame rounding) from
                 -- the effective inter-invoke interval.
+                -- 2.5: SYMMETRIC jitter — centered on the interval, so
+                -- the anti-pattern camouflage is preserved but the
+                -- average cycle no longer pays half the jitter range.
                 local pacingJitter = SETTINGS.PACING_JITTER_MAX > 0
-                    and math.random() * SETTINGS.PACING_JITTER_MAX
+                    and (math.random() - 0.5) * SETTINGS.PACING_JITTER_MAX
                     or 0
                 local invokeGate = lastSuccessAt + currentInterval + pacingJitter
 
