@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.5.1"
+local ENGINE_BUILD = "hyperflow-2.5.2"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -724,7 +724,11 @@ task.spawn(function()
                 2,
                 math.max(0, math.floor(numberSetting("GPINATA_MAX_RETRIES", 2)))
             ),
-            STARTUP_WAIT = math.max(0, numberSetting("GPINATA_STARTUP_WAIT", 60)),
+            -- 2.5.2: 60->35. Boot padding only — the 20s position-
+            -- stability gate independently protects early placement.
+            -- Roblox boot + engine init already consume ~35-40s of
+            -- this window on relaunch; the residual was dead wait.
+            STARTUP_WAIT = math.max(0, numberSetting("GPINATA_STARTUP_WAIT", 35)),
             STABLE_WAIT = math.max(0, numberSetting("GPINATA_STABLE_WAIT", 20)),
             FPS = math.max(1, numberSetting("GPINATA_FPS", 10)),
             STATUS_EVERY = math.max(1, math.floor(numberSetting("GPINATA_STATUS_EVERY", 100))),
