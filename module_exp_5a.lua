@@ -652,6 +652,13 @@ task.spawn(function()
                 0.02,
                 numberSetting("GPINATA_ADAPTIVE_PROBE_RETREAT_RATE", 0.04)
             ),
+            -- 2.3 probing below battle-tested ground is experimental:
+            -- each fine step demands a longer clean-evidence window than
+            -- ordinary recovery (400 vs 150 cycles).
+            ADAPTIVE_PROBE_LONG_WINDOW = math.max(
+                1,
+                math.floor(numberSetting("GPINATA_ADAPTIVE_PROBE_LONG_WINDOW", 400))
+            ),
             ADAPTIVE_HIGH_REJECT_RATE = math.max(
                 0,
                 numberSetting("GPINATA_ADAPTIVE_HIGH_REJECT_RATE", 0.25)
@@ -810,6 +817,10 @@ task.spawn(function()
         SETTINGS.ADAPTIVE_MAX_INTERVAL = math.max(
             SETTINGS.ADAPTIVE_MIN_INTERVAL,
             SETTINGS.ADAPTIVE_MAX_INTERVAL
+        )
+        SETTINGS.ADAPTIVE_PROBE_LONG_WINDOW = math.max(
+            SETTINGS.ADAPTIVE_LONG_WINDOW,
+            SETTINGS.ADAPTIVE_PROBE_LONG_WINDOW
         )
         SETTINGS.CIRCUIT_BREAKER_MAX_DELAY = math.max(
             SETTINGS.CIRCUIT_BREAKER_INITIAL_DELAY,
@@ -2544,22 +2555,13 @@ task.spawn(function()
             else
                 adaptivePressureWindows = 0
             end
-            local longWindowReady = historyCycles >= SETTINGS.ADAPTIVE_LONG_WINDOW
-            local recoveryEvidenceClean = longWindowReady
-                and adaptiveHistoryFailed == 0
-                and adaptiveHistorySecondRetries <= SETTINGS.ADAPTIVE_RECOVERY_MAX_SECOND_RETRIES
-                and historyRejectRate <= SETTINGS.ADAPTIVE_RECOVERY_MAX_REJECT_RATE
-            local recoveryHoldComplete = now >= adaptiveRecoveryNotBefore
-            local zoneHealthy = zoneHealthRemaining() <= 0
-            -- 2.2 hold-at-target: stop probing downward once the engine
-            -- confirms at TARGET_INTERVAL. The floor exists for
-            -- slow-down recovery overflow, not for pace-chasing.
-            local aboveTarget = currentInterval - SETTINGS.TARGET_INTERVAL > 0.001
-
-            -- 2.3 graduated descent: the calibration profile's
+            -- 2.3 graduated descent (computed early — the evidence
+            -- window requirement depends on which side of proven ground
+            -- we're stepping on): the calibration profile's
             -- non-provisional recommendedInterval is battle-tested
-            -- ground. Above it, recover with coarse steps; at or below
-            -- it, probe with fine steps.
+            -- ground. Above it, recover with coarse steps and the
+            -- normal window; at or below it, probe with fine steps and
+            -- a longer clean-evidence window.
             local qualifiedInterval = tonumber(calibrationProfile.recommendedInterval)
 
             if calibrationProfile.provisional then
@@ -2571,6 +2573,20 @@ task.spawn(function()
             local descentStep = atOrBelowQualified
                 and SETTINGS.ADAPTIVE_FINE_STEP
                 or SETTINGS.ADAPTIVE_STEP_DOWN
+            local requiredWindow = atOrBelowQualified
+                and SETTINGS.ADAPTIVE_PROBE_LONG_WINDOW
+                or SETTINGS.ADAPTIVE_LONG_WINDOW
+            local longWindowReady = historyCycles >= requiredWindow
+            local recoveryEvidenceClean = longWindowReady
+                and adaptiveHistoryFailed == 0
+                and adaptiveHistorySecondRetries <= SETTINGS.ADAPTIVE_RECOVERY_MAX_SECOND_RETRIES
+                and historyRejectRate <= SETTINGS.ADAPTIVE_RECOVERY_MAX_REJECT_RATE
+            local recoveryHoldComplete = now >= adaptiveRecoveryNotBefore
+            local zoneHealthy = zoneHealthRemaining() <= 0
+            -- 2.2 hold-at-target: stop probing downward once the engine
+            -- confirms at TARGET_INTERVAL. The floor exists for
+            -- slow-down recovery overflow, not for pace-chasing.
+            local aboveTarget = currentInterval - SETTINGS.TARGET_INTERVAL > 0.001
 
             -- 2.3 probe retreat: probing below proven ground with a
             -- persistently elevated reject rate means the floor is just
