@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.5"
+local ENGINE_BUILD = "hyperflow-2.5.1"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -2990,6 +2990,16 @@ task.spawn(function()
                     end
 
                     saveCache.total = totalAfter
+
+                    -- 2.5.1: anchor the pacing gate to INVOKE START, not
+                    -- invoke return. The old anchor billed the full
+                    -- round-trip latency (~100-140ms) onto every cycle:
+                    -- gate = invoke_return + interval made inter-invoke
+                    -- = interval + RTT. The server's cooldown anchors to
+                    -- ITS processing time (~invoke start + hop), so this
+                    -- is the faithful anchor. Rejection pressure and the
+                    -- adaptive controller still guard a too-tight floor.
+                    lastSuccessAt = invokeStartedAt
                 elseif ok and response ~= false then
                     didConfirm, amountUsed, totalAfter = waitForConfirmation(totalBefore)
                 elseif ok and response == false then
@@ -3012,7 +3022,10 @@ task.spawn(function()
                 if didConfirm then
                     recordConfirmation(amountUsed, totalAfter)
                     cycleConfirmed = true
-                    lastSuccessAt = os.clock()
+                    -- 2.5.1: invoke-anchored gate for the polled-confirm
+                    -- path (optimistic and late-confirm paths set the
+                    -- same anchor themselves before reaching here).
+                    lastSuccessAt = invokeStartedAt
 
                     if cycleHadServerReject then
                         recoveredCycles += 1
@@ -3038,7 +3051,8 @@ task.spawn(function()
                     if lateTotal and totalBefore > 0 and lateTotal < totalBefore then
                         recordConfirmation(totalBefore - lateTotal, lateTotal)
                         cycleConfirmed = true
-                        lastSuccessAt = os.clock()
+                        -- 2.5.1: invoke-anchored gate (see optimistic path)
+                        lastSuccessAt = invokeStartedAt
 
                         if cycleHadServerReject then
                             recoveredCycles += 1
