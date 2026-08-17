@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.4"
+local ENGINE_BUILD = "hyperflow-2.4.1"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -2291,6 +2291,14 @@ task.spawn(function()
             local payload = {
                 accountName = LocalPlayer and LocalPlayer.Name or "unknown",
                 robloxUserId = tostring(LocalPlayer and LocalPlayer.UserId or 0),
+                processId = (function()
+                    if type(get_process_identifier) ~= "function" then
+                        return nil
+                    end
+
+                    local ok, pid = pcall(get_process_identifier)
+                    return ok and tostring(pid) or nil
+                end)(),
                 ledgerDay = ledgerSnapshot.ledgerDay,
                 ledgerSessionId = ledgerSnapshot.ledgerSessionId,
                 ledgerSessionStartedAt = ledgerSnapshot.ledgerSessionStartedAt,
