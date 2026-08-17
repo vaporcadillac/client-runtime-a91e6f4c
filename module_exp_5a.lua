@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.3.1"
+local ENGINE_BUILD = "hyperflow-2.3.2"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -1632,11 +1632,16 @@ task.spawn(function()
         task.spawn(function()
             local PetCmds = nil
             local pinataTargets = {}
+            local touchPartCache = {}
             local connections = {}
 
+            -- Allocation-free case-insensitive match: a character-class
+            -- pattern avoids the string.lower allocation the old check
+            -- paid on EVERY instance added to workspace (orbs, FX,
+            -- parts — hundreds of events per second at peak).
             local function isPinataModel(obj)
                 return obj:IsA("Model")
-                    and string.find(string.lower(obj.Name), "pinata", 1, true) ~= nil
+                    and string.find(obj.Name, "[Pp][Ii][Nn][Aa][Tt][Aa]") ~= nil
             end
 
             for _, obj in ipairs(workspace:GetDescendants()) do
@@ -1653,6 +1658,7 @@ task.spawn(function()
 
             table.insert(connections, workspace.DescendantRemoving:Connect(function(obj)
                 pinataTargets[obj] = nil
+                touchPartCache[obj] = nil
             end))
 
             while not env.STOP_MINI_PINATA_FAST_PLACER
@@ -1675,14 +1681,34 @@ task.spawn(function()
                     end
 
                     local char = LocalPlayer.Character
+                    local characterRoot = getCharacterRoot()
                     local targetPinata = nil
+                    local targetTouchPart = nil
 
+                    -- Touch-part cache: recursive FindFirstChildWhichIsA
+                    -- scans were the hottest lookup in this loop. Cache
+                    -- per model; validate cheaply (Parent check), rescan
+                    -- only on cache miss or invalidation.
                     for obj in pairs(pinataTargets) do
-                        if obj.Parent
-                            and obj:FindFirstChildWhichIsA("TouchTransmitter", true)
-                        then
-                            targetPinata = obj
-                            break
+                        if obj.Parent then
+                            local cached = touchPartCache[obj]
+
+                            if cached and cached.Parent then
+                                targetPinata = obj
+                                targetTouchPart = cached
+                                break
+                            end
+
+                            local found = obj:FindFirstChildWhichIsA("TouchTransmitter", true)
+
+                            if found then
+                                touchPartCache[obj] = found
+                                targetPinata = obj
+                                targetTouchPart = found
+                                break
+                            end
+                        else
+                            touchPartCache[obj] = nil
                         end
                     end
 
@@ -1717,16 +1743,15 @@ task.spawn(function()
                             end
                         end
 
-                        local touchPart = targetPinata:FindFirstChildWhichIsA("BasePart", true)
-                        local characterRoot = getCharacterRoot()
-
-                        if touchPart
+                        -- Cached touch validation replaces the second
+                        -- recursive scan per tick.
+                        if targetTouchPart
+                            and targetTouchPart.Parent
                             and characterRoot
-                            and touchPart:FindFirstChildWhichIsA("TouchTransmitter", true)
                         then
                             if type(firetouchinterest) == "function" then
-                                pcall(firetouchinterest, characterRoot, touchPart, 0)
-                                pcall(firetouchinterest, characterRoot, touchPart, 1)
+                                pcall(firetouchinterest, characterRoot, targetTouchPart, 0)
+                                pcall(firetouchinterest, characterRoot, targetTouchPart, 1)
                             end
                         end
                     end
