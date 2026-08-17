@@ -1,5 +1,5 @@
 local env = getgenv()
-local LEDGER_BUILD = "fleet-ledger-1.5"
+local LEDGER_BUILD = "fleet-ledger-1.6"
 
 if env.GLEDGER_ENABLED == false then
     return
@@ -67,20 +67,13 @@ task.spawn(function()
         TARGET_ZONE = tonumber(env.GZONE_TO),
     }
 
+    -- 1.6: gems-only accounting. Loot line-items (gift bags, charm
+    -- stones, cocktails, keys, etc.) removed — bag arbitrage made the
+    -- item book ambiguous (purchases read as loot). Mini Pinata stays:
+    -- it is the consumption counter for piñata/hour and gems-per-
+    -- piñata, not loot. Override via GLEDGER_ITEMS if ever needed.
     local DEFAULT_ITEMS = {
         "Mini Pinata",
-        "Gift Bag",
-        "Large Gift Bag",
-        "Charm Stone",
-        "The Cocktail",
-        "Seed Bag",
-        "Diamond Seed Bag",
-        "Hasty Flag",
-        "Sprinkler",
-        "Secret Key",
-        "Key Upper Half",
-        "Key Lower Half",
-        "Lucky Block",
     }
     local configuredItems = type(env.GLEDGER_ITEMS) == "table"
         and env.GLEDGER_ITEMS
