@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.3"
+local ENGINE_BUILD = "hyperflow-2.3.1"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -1732,7 +1732,11 @@ task.spawn(function()
                     end
                 end
 
-                task.wait(0.1)
+                -- 2.3: at the 5 FPS idle cap this loop's 0.1s tick is
+                -- frame-quantized to ~200ms anyway; align the wait to
+                -- reality and halve per-tick call volume (SetTarget,
+                -- pet teleports, touch fires).
+                task.wait(0.2)
             end
 
             for _, connection in ipairs(connections) do
