@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.2"
+local ENGINE_BUILD = "hyperflow-2.3"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -637,6 +637,20 @@ task.spawn(function()
             ADAPTIVE_STEP_DOWN = math.max(
                 0.01,
                 numberSetting("GPINATA_ADAPTIVE_STEP_DOWN", 0.05)
+            ),
+            -- 2.3 graduated descent: once an interval is battle-tested
+            -- (qualified in the calibration profile), probing below it
+            -- uses a finer step so the engine converges tightly on the
+            -- true server floor instead of leaping past it.
+            ADAPTIVE_FINE_STEP = math.max(
+                0.005,
+                numberSetting("GPINATA_ADAPTIVE_FINE_STEP", 0.025)
+            ),
+            -- Reject rate that, while probing below proven ground,
+            -- triggers a one-fine-step retreat back toward it.
+            ADAPTIVE_PROBE_RETREAT_RATE = math.max(
+                0.02,
+                numberSetting("GPINATA_ADAPTIVE_PROBE_RETREAT_RATE", 0.04)
             ),
             ADAPTIVE_HIGH_REJECT_RATE = math.max(
                 0,
@@ -2541,6 +2555,56 @@ task.spawn(function()
             -- confirms at TARGET_INTERVAL. The floor exists for
             -- slow-down recovery overflow, not for pace-chasing.
             local aboveTarget = currentInterval - SETTINGS.TARGET_INTERVAL > 0.001
+
+            -- 2.3 graduated descent: the calibration profile's
+            -- non-provisional recommendedInterval is battle-tested
+            -- ground. Above it, recover with coarse steps; at or below
+            -- it, probe with fine steps.
+            local qualifiedInterval = tonumber(calibrationProfile.recommendedInterval)
+
+            if calibrationProfile.provisional then
+                qualifiedInterval = nil
+            end
+
+            local atOrBelowQualified = qualifiedInterval ~= nil
+                and currentInterval <= qualifiedInterval + 0.001
+            local descentStep = atOrBelowQualified
+                and SETTINGS.ADAPTIVE_FINE_STEP
+                or SETTINGS.ADAPTIVE_STEP_DOWN
+
+            -- 2.3 probe retreat: probing below proven ground with a
+            -- persistently elevated reject rate means the floor is just
+            -- above us. Nudge back up ONE fine step — a light touch: no
+            -- history wipe, no protective profile save (that would
+            -- clobber the qualified anchor), no webhook spam.
+            if not atOrBelowQualified
+                and qualifiedInterval ~= nil
+                and currentInterval < qualifiedInterval - 0.001
+                and adaptiveWindowCycles >= SETTINGS.ADAPTIVE_WINDOW
+                and rejectRate >= SETTINGS.ADAPTIVE_PROBE_RETREAT_RATE
+                and rejectRate < SETTINGS.ADAPTIVE_HIGH_REJECT_RATE
+                and currentInterval + SETTINGS.ADAPTIVE_FINE_STEP <= qualifiedInterval + 0.001
+            then
+                local previousInterval = currentInterval
+                currentInterval = math.min(
+                    qualifiedInterval,
+                    currentInterval + SETTINGS.ADAPTIVE_FINE_STEP
+                )
+                dashboard.interval = currentInterval
+                dashboard.hourly = 3600 / currentInterval
+                dashboard.daily = 86400 / currentInterval
+                resetAdaptiveWindow()
+                print(string.format(
+                    "[Runtime] Adaptive | probe retreat %.2fs -> %.2fs | rejected %d/%d below proven %.2fs",
+                    previousInterval,
+                    currentInterval,
+                    adaptiveWindowRejected,
+                    adaptiveWindowCycles,
+                    qualifiedInterval
+                ))
+                return
+            end
+
             if rejectRate < SETTINGS.ADAPTIVE_HIGH_REJECT_RATE
                 and currentInterval > SETTINGS.ADAPTIVE_MIN_INTERVAL
                 and aboveTarget
@@ -2548,7 +2612,7 @@ task.spawn(function()
                 and recoveryHoldComplete
                 and zoneHealthy
             then
-                if applyAdaptiveIntervalChange(math.max(SETTINGS.TARGET_INTERVAL, currentInterval - SETTINGS.ADAPTIVE_STEP_DOWN), "long-window stable recovery", evidence, SETTINGS.ADAPTIVE_RECOVERY_HOLD) then return end
+                if applyAdaptiveIntervalChange(math.max(SETTINGS.TARGET_INTERVAL, currentInterval - descentStep), "long-window stable recovery", evidence, SETTINGS.ADAPTIVE_RECOVERY_HOLD) then return end
             end
             resetAdaptiveWindow()
         end
