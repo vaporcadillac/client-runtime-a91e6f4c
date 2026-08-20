@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.5.3"
+local ENGINE_BUILD = "hyperflow-2.5.4"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -931,6 +931,7 @@ task.spawn(function()
         local MapCmds = nil
         local ConsumeEndpoint = nil
         local lastResolvedEndpointLabel = nil
+        local remoteTripwireAlerted = false
 
         local function executorFunction(name)
             local candidate = rawget(env, name) or rawget(_G, name)
@@ -1378,21 +1379,96 @@ task.spawn(function()
             }
         end
 
+        -- hyperflow-2.5.4: counts every distinct RemoteFunction in the
+        -- Network folder matching the mini-pinata consume signature
+        -- (alias name OR signature scan). Anti-honeypot tripwire input:
+        -- if BIG Games rotates the remote and keeps the old one alive
+        -- as an "accepting" decoy, this returns 2+ and the engine
+        -- refuses to invoke rather than guessing which is genuine.
+        local function countMatchingRemotes(network, aliases)
+            if not network then
+                return 0, {}
+            end
+
+            local aliasSet = {}
+            for _, alias in ipairs(aliases) do
+                aliasSet[normalizeRemoteName(alias)] = true
+            end
+
+            local seen = {}
+            local names = {}
+            local count = 0
+
+            for _, candidate in ipairs(network:GetDescendants()) do
+                if candidate:IsA("RemoteFunction") then
+                    local normalized = normalizeRemoteName(candidate.Name)
+                    local isMatch = aliasSet[normalized] ~= nil
+
+                    if not isMatch then
+                        local mentionsMiniPinata = string.find(
+                            normalized, "minipinata", 1, true) ~= nil
+                        local looksConsumptive = string.find(
+                            normalized, "consume", 1, true) ~= nil
+                            or string.find(normalized, "activate", 1, true) ~= nil
+                            or string.find(normalized, "use", 1, true) ~= nil
+                        isMatch = mentionsMiniPinata and looksConsumptive
+                    end
+
+                    if isMatch and not seen[candidate] then
+                        seen[candidate] = true
+                        count += 1
+                        table.insert(names, candidate:GetFullName())
+                    end
+                end
+            end
+
+            return count, names
+        end
+
         local function getConsumeEndpoint()
             heartbeat("remote resolution")
 
-            if endpointValid(ConsumeEndpoint) then
-                return ConsumeEndpoint
-            end
-
-            ConsumeEndpoint = nil
-            dashboard.remote = "Resolving"
+            -- hyperflow-2.5.4: anti-honeypot resolution. EVERY call
+            -- (i.e. every cycle) re-resolves fresh by name; the cached
+            -- instance is never trusted across cycles. Rotation to a
+            -- new name is picked up immediately; a stale decoy kept
+            -- alive trips the ambiguity wire and placement halts.
             local aliases = remoteAliases()
+            local ambiguityLimit = math.max(1, tonumber(env.GPINATA_REMOTE_AMBIGUITY_LIMIT) or 1)
+            local tripwireEnabled = env.GPINATA_REMOTE_TRIPWIRE ~= false
             local deadline = os.clock() + SETTINGS.AUTO_REMOTE_RESOLVE_TIMEOUT
 
             repeat
                 heartbeat("remote resolution")
                 local network = ReplicatedStorage:FindFirstChild("Network")
+
+                if tripwireEnabled then
+                    local matchCount, matchNames = countMatchingRemotes(network, aliases)
+
+                    if matchCount > ambiguityLimit then
+                        ConsumeEndpoint = nil
+                        dashboard.remote = "AMBIGUOUS (" .. matchCount .. ")"
+
+                        if not remoteTripwireAlerted then
+                            remoteTripwireAlerted = true
+
+                            sendWebhook({
+                                title = "REMOTE TRIPWIRE - Suspected Honeypot",
+                                description = "Multiple remotes now match the mini pinata consume signature. Placement is HALTED rather than guessing which one is genuine — calling a rotated-out decoy is a known detection vector. Verify the current remote (zonespy capture on a manual use) and pin it with GPINATA_REMOTE_NAME, or wait for the decoy to disappear.",
+                                color = 16711680,
+                                critical = true,
+                                targetZone = SETTINGS.TARGET_ZONE,
+                                fields = {
+                                    webhookField("Matches", table.concat(matchNames, " | "), false),
+                                    webhookField("Engine", ENGINE_BUILD, true),
+                                },
+                            })
+                        end
+
+                        return nil
+                    end
+                end
+
                 local endpoint = findDirectEndpoint(network, aliases)
 
                 if not endpoint then
@@ -1400,6 +1476,24 @@ task.spawn(function()
                 end
 
                 if endpoint then
+                    local rotated = ConsumeEndpoint ~= nil
+                        and ConsumeEndpoint.kind == "instance"
+                        and endpoint.kind == "instance"
+                        and ConsumeEndpoint.remote ~= endpoint.remote
+
+                    if rotated and not remoteTripwireAlerted then
+                        sendWebhook({
+                            title = "Consume Remote ROTATED",
+                            description = "The mini pinata consume remote changed names mid-session. The engine re-resolved to the fresh remote automatically. If this was NOT expected, verify with a zonespy capture before continuing.",
+                            color = 16753920,
+                            targetZone = SETTINGS.TARGET_ZONE,
+                            fields = {
+                                webhookField("New Remote", endpoint.label, false),
+                                webhookField("Engine", ENGINE_BUILD, true),
+                            },
+                        })
+                    end
+
                     ConsumeEndpoint = endpoint
                     announceResolvedEndpoint(endpoint)
                     return endpoint
