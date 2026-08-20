@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.5.2"
+local ENGINE_BUILD = "hyperflow-2.5.3"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -2360,10 +2360,24 @@ task.spawn(function()
             if telemetryPublisherRunning or not telemetryRequest or not telemetryEndpoint or not telemetryWriteKey then return end
             telemetryPublisherRunning = true
             task.spawn(function()
+                -- hyperflow-2.5.3: periodic calibration flush. The profile
+                -- previously persisted only on qualified change, so the disk
+                -- file could lag the in-memory interval by hours (observed
+                -- 2026-08-20: disk 6.9s vs live 10.7/min). Flush on a timer
+                -- so dashboards and the fleet agent always read fresh state.
+                -- Throttled to one write per 10 minutes; unchanged values
+                -- still refresh updatedAt for staleness diagnostics.
+                local lastCalibrationFlushAt = 0
                 while not env.STOP_MINI_PINATA_FAST_PLACER
                     and env.__GPINATA_ENGINE_GENERATION == engineGeneration
                 do
                     publishTelemetry()
+                    if calibrationPersistent
+                        and os.clock() - lastCalibrationFlushAt >= 600
+                    then
+                        lastCalibrationFlushAt = os.clock()
+                        saveCalibrationProfile()
+                    end
                     local deadline = os.clock() + telemetryInterval
                     while not env.STOP_MINI_PINATA_FAST_PLACER and os.clock() < deadline do
                         task.wait(math.min(1, deadline - os.clock()))
