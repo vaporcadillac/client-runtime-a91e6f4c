@@ -3,7 +3,7 @@
 -- runtime value (items, ceilings, intervals, roles, webhooks)
 -- flows from it. No hunting through the file.
 --
--- ROLES per account (ACCOUNT_5_NAME can be "sniper" or "seller"; others fixed):
+-- ROLES per account (2tqeg can be "sniper" or "seller"; others fixed):
 --   "sniper" = terminal-guided booth sniping
 --   "seller" = booth seller (raffle/stones/keys)
 --
@@ -57,12 +57,12 @@ end
 
 env[sessionKey] = true
 
-local ACCOUNT_1 = string.lower("ACCOUNT_1_NAME")
-local ACCOUNT_2 = string.lower("ACCOUNT_2_NAME")
-local ACCOUNT_3 = string.lower("ACCOUNT_3_NAME")
-local ACCOUNT_4 = string.lower("ACCOUNT_4_NAME")
-local ACCOUNT_5 = string.lower("ACCOUNT_5_NAME")
-local ACCOUNT_6 = string.lower("ACCOUNT_6_NAME")
+local ACCOUNT_1 = string.lower("scoobiesnaxx691")
+local ACCOUNT_2 = string.lower("vaanila14")
+local ACCOUNT_3 = string.lower("Majorette058")
+local ACCOUNT_4 = string.lower("7pyze")
+local ACCOUNT_5 = string.lower("2tqeg")
+local ACCOUNT_6 = string.lower("amb19")
 
 local ZAPHUB_KEY = CFG.ZapKey
 local FLEET_WEBHOOK = CFG.FleetWebhook
@@ -577,7 +577,7 @@ end
 local function startZapHubMailer()
     if env.GZAPMAILER_ENABLED == false then return end
 
-    local mail = { Receiver = "ACCOUNT_5_NAME", GemsTrigger = CFG.MailTriggerGems or 500000000, GemsKeep = CFG.MailKeepGems or 5000000, CharmStoneTrigger = 10000, CrystalKeyTrigger = 10000 }
+    local mail = { Receiver = "2tqeg", GemsTrigger = CFG.MailTriggerGems or 500000000, GemsKeep = CFG.MailKeepGems or 5000000, CharmStoneTrigger = 10000, CrystalKeyTrigger = 10000 }
     _G.ZapHubMailerSettings = {
         Users = { mail.Receiver },
         Items = {
@@ -999,6 +999,7 @@ local function runFarmer(zoneTo)
 
     env.GZONEKEEPER_ENABLED = true
     env.GZONEKEEPER_ZONE = zoneTo
+    env.GZONE_TO = zoneTo -- engine calibration zone (was missing: all farmers defaulted to 39)
     env.GWEBHOOK_USERID = "PASTE_YOUR_DISCORD_USER_ID_HERE"
     env.GWEBHOOK_LINK = FLEET_WEBHOOK
 
@@ -1015,19 +1016,19 @@ end
 print("[Hydra] " .. HYDRA_BUILD .. " booting for " .. player.Name .. " | config loaded OK")
 
 local handlers = {
-    [ACCOUNT_1] = function() runFarmer(CFG.FarmerZones["ACCOUNT_1_NAME"] or 44) end,
-    [ACCOUNT_2] = function() runFarmer(CFG.FarmerZones["ACCOUNT_2_NAME"] or 39) end,
-    [ACCOUNT_3] = function() runFarmer(CFG.FarmerZones["ACCOUNT_3_NAME"] or 32) end,
+    [ACCOUNT_1] = function() runFarmer(CFG.FarmerZones["scoobiesnaxx691"] or 44) end,
+    [ACCOUNT_2] = function() runFarmer(CFG.FarmerZones["vaanila14"] or 39) end,
+    [ACCOUNT_3] = function() runFarmer(CFG.FarmerZones["Majorette058"] or 32) end,
     [ACCOUNT_4] = function()
         env.GPINATA_TARGET_INTERVAL = 5.5
-        runFarmer(CFG.FarmerZones["ACCOUNT_4_NAME"] or 26)
+        runFarmer(CFG.FarmerZones["7pyze"] or 26)
     end,
     [ACCOUNT_5] = function()
-        local role = CFG["ACCOUNT_5_NAME_role"] or "sniper"
-        if role == "seller" then runSeller("ACCOUNT_5_NAME")
-        else runSniper("ACCOUNT_5_NAME", 5) end
+        local role = CFG["2tqeg_role"] or "sniper"
+        if role == "seller" then runSeller("2tqeg")
+        else runSniper("2tqeg", 5) end
     end,
-    [ACCOUNT_6] = function() runSniper("ACCOUNT_6_NAME", 5) end,
+    [ACCOUNT_6] = function() runSniper("amb19", 5) end,
 }
 
 local selected = handlers[username]
