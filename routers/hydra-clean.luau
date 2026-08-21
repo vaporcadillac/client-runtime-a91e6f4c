@@ -11,65 +11,30 @@
 -- (rename others to *.off). Volt runs every .luau in autoexec.
 --============================================================
 
-local CFG = {
-    --========================================================
-    -- EDIT THINGS BELOW THIS LINE ONLY
-    --========================================================
+--============================================================-- HYDRA ROUTER | hydra-clean
+-- CONFIG FILE: reads hydra-config.luau (the ONLY file you edit).
+-- Never touch this file again.
+--
+-- USAGE: hydra-config.luau + this file both in autoexec; rename
+-- other hydra files to *.off so only one router runs.
+--============================================================
 
-    -- ZapHub key (shared fleet seat)
-    ZapKey = "PASTE_YOUR_ZAPHUB_KEY_HERE",
+local env = getgenv()
 
-    -- Discord webhooks
-    FleetWebhook  = "PASTE_YOUR_FLEET_WEBHOOK_HERE",
-    SniperWebhook = "PASTE_YOUR_SNIPER_WEBHOOK_HERE",
+-- load the config file (pure table, sets getgenv().HYDRA_CFG)
+local loadOk, loadErr = pcall(function()
+    return loadstring(readfile("hydra-config.luau"))()
+end)
+if not loadOk then
+    warn("[Hydra] FATAL: could not load hydra-config.luau: " .. tostring(loadErr))
+    return
+end
 
-    -- SNIPER: what to search in the terminal, in priority order,
-    -- and the max price ZapHub pays per item (MaxPrice).
-    SniperSearchOrder = {
-        "Exclusive Raffle Ticket",
-        "Large Gift Bag",
-        "Gift Bag",
-        "Pinata",
-    },
-    SniperItems = {
-        { Class = "Misc", Item = "Exclusive Raffle Ticket", MaxPrice = 15000000 },
-        { Class = "Misc", Item = "Large Gift Bag",           MaxPrice = 6700 },
-        { Class = "Misc", Item = "Gift Bag",                  MaxPrice = 1500 },
-        { Class = "Misc", Item = "Pinata",                    MaxPrice = 35000 },
-    },
-
-    -- SNIPER: seconds to park in a server between terminal searches.
-    -- This IS the teleport cadence (search happens after the dwell).
-    SearchInterval = 180,
-
-    -- SELLER: items listed at fixed prices (ACCOUNT_5_NAME when role="seller")
-    SellerItems = {
-        { Class = "Misc", Item = "Exclusive Raffle Ticket", Price = 20600000 },
-        { Class = "Misc", Item = "Charm Stone",             Price = 9800 },
-        { Class = "Misc", Item = "Crystal Key",             Price = 8900 },
-    },
-
-    -- ROLES (lowercase usernames): "sniper" or "seller".
-    -- Only ACCOUNT_5_NAME and ACCOUNT_6_NAME are configurable here; the farmers
-    -- (accounts 1-4) always farm.
-    Roles = {
-        ["ACCOUNT_5_NAME"] = "sniper",   -- <- switch to "seller" for sell mode
-        ["ACCOUNT_6_NAME"] = "sniper",
-    },
-
-    -- FARMER mailer: sweep thresholds -> ACCOUNT_5_NAME
-    Mail = {
-        Receiver = "ACCOUNT_5_NAME",
-        GemsTrigger   = 500000000,   -- mail when gems exceed this
-        GemsKeep      = 5000000,     -- leave this much behind
-        CharmStoneTrigger = 10000,
-        CrystalKeyTrigger  = 10000,
-    },
-
-    --========================================================
-    -- EDIT THINGS ABOVE THIS LINE ONLY
-    --========================================================
-}
+local CFG = env.HYDRA_CFG
+if type(CFG) ~= "table" then
+    warn("[Hydra] FATAL: hydra-config.luau did not set HYDRA_CFG.")
+    return
+end
 
 --============================================================ constants
 
@@ -613,7 +578,7 @@ end
 local function startZapHubMailer()
     if env.GZAPMAILER_ENABLED == false then return end
 
-    local mail = CFG.Mail
+    local mail = { Receiver = "ACCOUNT_5_NAME", GemsTrigger = CFG.MailTriggerGems or 500000000, GemsKeep = CFG.MailKeepGems or 5000000, CharmStoneTrigger = 10000, CrystalKeyTrigger = 10000 }
     _G.ZapHubMailerSettings = {
         Users = { mail.Receiver },
         Items = {
@@ -667,20 +632,26 @@ end
 local SNIPER_SESSION_FILE = "hydra_sniper_session.luau"
 
 local function sniperSessionSource()
-    -- build the ZapHub items block from CFG
+    -- config is a dict {["Item"] = maxprice}; convert to arrays
+    local sniperLanes = {}
+    for itemName, price in pairs(CFG.SniperItems or {}) do
+        table.insert(sniperLanes, { Item = itemName, MaxPrice = tonumber(price) or 0 })
+    end
+
     local zapItems = {}
-    for _, item in ipairs(CFG.SniperItems) do
+    for _, item in ipairs(sniperLanes) do
         table.insert(zapItems, string.format(
             "{Class = \"Misc\", Item = \"%s\", MaxPrice = %d, MaxInInventory = 999999},",
             item.Item, item.MaxPrice))
     end
     local zapItemsText = table.concat(zapItems, "\n        ")
 
-    -- build the terminal search ITEMS from CFG (priority order)
+    -- search order = insertion order of the config dict (Luau preserves
+    -- string-key insertion order), so the first line is the priority lane
     local searchNames = {}
-    for _, name in ipairs(CFG.SniperSearchOrder) do
+    for _, item in ipairs(sniperLanes) do
         table.insert(searchNames, string.format(
-            "{ name = \"%s\", class = \"Misc\", id = \"%s\" },", name, name))
+            "{ name = \"%s\", class = \"Misc\", id = \"%s\" },", item.Item, item.Item))
     end
     local searchNamesText = table.concat(searchNames, "\n        ")
 
@@ -867,7 +838,21 @@ local function startSniperStack()
     return true
 end
 
---============================================================ roles
+local function configToZapItems(dict)
+    local out = {}
+    for itemName, price in pairs(dict or {}) do
+        table.insert(out, { Class = "Misc", Item = itemName, MaxPrice = tonumber(price) or 0 })
+    end
+    return out
+end
+
+local function configToSellerItems(dict)
+    local out = {}
+    for itemName, price in pairs(dict or {}) do
+        table.insert(out, { Class = "Misc", Item = itemName, Price = tonumber(price) or 0 })
+    end
+    return out
+end--============================================================ roles
 
 local function runSniper(accountName, fps)
     applyFullPerfStack(fps)
@@ -875,7 +860,7 @@ local function runSniper(accountName, fps)
     if not startSniperStack() then
         _G.ZapHubBoothsSniperSettings = {
             MinimumGems = 0,
-            Items = CFG.SniperItems,
+            Items = configToZapItems(CFG.SniperItems),
             Extras = {},
             CustomExtras = {},
             ServerHop = { Enabled = true, Type = "Both" },
@@ -901,7 +886,7 @@ local function runSeller(accountName)
     end)
 
     _G.ZapHubBoothSellerSettings = {
-        Items = CFG.SellerItems,
+        Items = configToSellerItems(CFG.SellerItems),
         Extras = {},
         CustomExtras = {},
         ServerHop = { Enabled = true, Type = "Both", Time = 5 },
@@ -936,15 +921,15 @@ end
 print("[Hydra] " .. HYDRA_BUILD .. " booting for " .. player.Name)
 
 local handlers = {
-    [ACCOUNT_1] = function() runFarmer(44) end,
-    [ACCOUNT_2] = function() runFarmer(39) end,
-    [ACCOUNT_3] = function() runFarmer(32) end,
+    [ACCOUNT_1] = function() runFarmer(CFG.FarmerZones["ACCOUNT_1_NAME"] or 44) end,
+    [ACCOUNT_2] = function() runFarmer(CFG.FarmerZones["ACCOUNT_2_NAME"] or 39) end,
+    [ACCOUNT_3] = function() runFarmer(CFG.FarmerZones["ACCOUNT_3_NAME"] or 32) end,
     [ACCOUNT_4] = function()
         env.GPINATA_TARGET_INTERVAL = 5.5
-        runFarmer(26)
+        runFarmer(CFG.FarmerZones["ACCOUNT_4_NAME"] or 26)
     end,
     [ACCOUNT_5] = function()
-        local role = CFG.Roles[ACCOUNT_5] or "sniper"
+        local role = CFG["ACCOUNT_5_NAME_role"] or "sniper"
         if role == "seller" then runSeller("ACCOUNT_5_NAME")
         else runSniper("ACCOUNT_5_NAME", 5) end
     end,
