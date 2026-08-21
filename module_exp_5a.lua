@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.5.5"
+local ENGINE_BUILD = "hyperflow-2.5.4"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -855,11 +855,6 @@ task.spawn(function()
 
         local fpsCapApplied = false
 
-        -- 2.5.5: invoke-ramp fps ceiling is now configurable via
-        -- env.GPINATA_INVOKE_FPS (default 60 = old behavior). Lower
-        -- values cut CPU/GPU churn if rendering isn't suppressed.
-        local invokeRampFps = math.max(10, numberSetting("GPINATA_INVOKE_FPS", 60))
-
         local function applyFpsCap(fps)
             if type(setfpscap) ~= "function" then
                 return
@@ -908,10 +903,10 @@ task.spawn(function()
 
                 if remaining <= 0.3 and stage < 2 then
                     stage = 2
-                    applyFpsCap(invokeRampFps)
+                    applyFpsCap(60)
                 elseif remaining <= 1.2 and stage < 1 then
                     stage = 1
-                    applyFpsCap(math.min(30, invokeRampFps))
+                    applyFpsCap(30)
                 end
 
                 task.wait(math.max(0.03, math.min(0.25, remaining)))
@@ -3062,7 +3057,7 @@ task.spawn(function()
 
                 -- FPS boost during remote invocation; yield one frame so
                 -- the raised cap is live before the remote fires.
-                applyFpsCap(invokeRampFps)
+                applyFpsCap(60)
                 RunService.Heartbeat:Wait()
 
                 local ok, response, didTimeout = invokeConsumeWithTimeout(endpoint, uid)
