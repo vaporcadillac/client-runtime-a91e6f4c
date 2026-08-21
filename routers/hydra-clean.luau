@@ -899,7 +899,7 @@ local function runSeller(accountName)
         Items = configToSellerItems(CFG.SellerItems),
         Extras = {},
         CustomExtras = {},
-        ServerHop = { Enabled = true, Type = "Both", Time = 5 },
+        ServerHop = { Enabled = false, Type = "Both", Time = 5 },
         Webhook = { Enabled = true, WebhookURL = FLEET_WEBHOOK },
     }
 
