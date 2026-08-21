@@ -47,7 +47,6 @@ local player = Players.LocalPlayer
 
 while not player do task.wait() player = Players.LocalPlayer end
 
-local env = getgenv()
 local username = string.lower(player.Name)
 local sessionKey = "HydraRouter_" .. HYDRA_BUILD .. "_" .. tostring(player.UserId)
 
