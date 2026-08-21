@@ -9,7 +9,7 @@ getgenv().HYDRA_CFG = {
     --========================================================
     -- WHAT ACCOUNT_5 DOES: "sniper" (hunts booths) or "seller" (sells)
     --========================================================
-    ["ACCOUNT_5_NAME_role"] = "sniper",
+    ["ACCOUNT_5_NAME_role"] = "seller",
 
     --========================================================
     -- SNIPERS: items to hunt and the max price to pay.
@@ -36,6 +36,12 @@ getgenv().HYDRA_CFG = {
         ["Charm Stone"]             = 9800,
         ["Crystal Key"]             = 8900,
     },
+
+    --========================================================
+    -- SELLER: hop to a fresh server if THIS server has 0 players
+    -- for this many minutes. 0 = disabled.
+    --========================================================
+    SellerHopEmptyMinutes = 5,
 
     --========================================================
     -- FARMERS: sweep gems to ACCOUNT_5_NAME once they pass the trigger,

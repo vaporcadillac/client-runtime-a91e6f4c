@@ -862,7 +862,89 @@ local function configToSellerItems(dict)
         table.insert(out, { Class = "Misc", Item = itemName, Price = tonumber(price) or 0 })
     end
     return out
-end--============================================================ roles
+end--============================================================ seller empty-hop (player-count driven)
+-- Replaces ZapHub's timed serverhop: if the server sits at 0 players
+-- for SellerHopEmptyMinutes (config), teleport to a random public
+-- server. Autoexec re-arms the seller on arrival.
+
+local function startSellerEmptyHop()
+    local emptyMinutes = tonumber(CFG.SellerHopEmptyMinutes)
+    if not emptyMinutes or emptyMinutes <= 0 then
+        print("[Hydra] Seller empty-hop disabled (SellerHopEmptyMinutes=0).")
+        return
+    end
+
+    task.spawn(function()
+        if not game:IsLoaded() then game.Loaded:Wait() end
+
+        local TeleportService = game:GetService("TeleportService")
+        local HttpService = game:GetService("HttpService")
+
+        task.wait(120) -- settle after boot before judging emptiness
+
+        local emptySince = nil
+
+        while true do
+            local playerCount = #Players:GetPlayers()
+
+            if playerCount == 0 then
+                emptySince = emptySince or os.clock()
+            else
+                emptySince = nil
+            end
+
+            if emptySince and (os.clock() - emptySince) >= emptyMinutes * 60 then
+                print(string.format(
+                    "[Hydra] Server empty for %.0f+ min; hopping.",
+                    (os.clock() - emptySince) / 60))
+
+                local placeId = game.PlaceId
+                local currentJob = game.JobId
+                local target = nil
+
+                local ok, res = pcall(function()
+                    return request({
+                        Url = "https://games.roblox.com/v1/games/"
+                            .. tostring(placeId)
+                            .. "/servers/Public?sortOrder=2&limit=100",
+                        Method = "GET",
+                    })
+                end)
+
+                if ok and res and res.Body then
+                    local dOk, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+
+                    if dOk and type(data) == "table" and type(data.data) == "table" then
+                        local candidates = {}
+                        for _, server in ipairs(data.data) do
+                            if server.id ~= currentJob
+                                and (server.playing or 0) < (server.maxPlayers or 200)
+                            then
+                                table.insert(candidates, server.id)
+                            end
+                        end
+                        if #candidates > 0 then
+                            target = candidates[math.random(#candidates)]
+                        end
+                    end
+                end
+
+                if target then
+                    pcall(function()
+                        TeleportService:TeleportToPlaceInstance(placeId, target)
+                    end)
+                    return
+                end
+
+                print("[Hydra] Empty-hop: no joinable server found; will retry.")
+                emptySince = os.clock()
+            end
+
+            task.wait(30)
+        end
+    end)
+end
+--============================================================ roles
 
 local function runSniper(accountName, fps)
     applyFullPerfStack(fps)
@@ -907,6 +989,7 @@ local function runSeller(accountName)
     loadstring(game:HttpGet("https://zaphub.xyz/ExecBoothSeller"))()
 
     startZapHubAutoMinimize()
+    startSellerEmptyHop()
 
     print(string.format("[Hydra] %s: booth seller (config items).", accountName))
 end
