@@ -603,6 +603,17 @@ local function startZapHubMailer()
     end)
 end
 
+--============================================================ ZapHub Exec (farmers)
+
+local function startZapHub()
+    task.spawn(function()
+        if not game:IsLoaded() then game.Loaded:Wait() end
+        task.wait(tonumber(env.GZAPHUB_DELAY) or 30)
+        script_key = ZAPHUB_KEY
+        loadstring(game:HttpGet("https://zaphub.xyz/Exec"))()
+        print("[Hydra] ZapHub loaded (Exec).")
+    end)
+end
 --============================================================ ZapHub auto-minimize
 
 local function startZapHubAutoMinimize()
@@ -911,13 +922,14 @@ local function runFarmer(zoneTo)
     applyPinataEngineSettings()
     startZoneKeeper()
     startPinataEngine()
+    startZapHub()
     startZapHubAutoMinimize()
     startZapHubMailer()
 end
 
 --============================================================ dispatch
 
-print("[Hydra] " .. HYDRA_BUILD .. " booting for " .. player.Name)
+print("[Hydra] " .. HYDRA_BUILD .. " booting for " .. player.Name .. " | config loaded OK")
 
 local handlers = {
     [ACCOUNT_1] = function() runFarmer(CFG.FarmerZones["ACCOUNT_1_NAME"] or 44) end,
