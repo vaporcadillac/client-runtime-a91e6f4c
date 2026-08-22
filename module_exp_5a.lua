@@ -1,5 +1,5 @@
 local env = getgenv()
-local ENGINE_BUILD = "hyperflow-2.5.4"
+local ENGINE_BUILD = "hyperflow-2.6.0"
 
 local function startFleetLedger()
     if env.GLEDGER_ENABLED == false
@@ -701,6 +701,14 @@ task.spawn(function()
                     0
                 ))
             ),
+            EARLY_DEMOTE_REJECTS = math.max(
+                1,
+                math.floor(numberSetting("GPINATA_EARLY_DEMOTE_REJECTS", 2))
+            ),
+            EARLY_DEMOTE_WINDOW = math.max(
+                5,
+                math.floor(numberSetting("GPINATA_EARLY_DEMOTE_WINDOW", 20))
+            ),
             ISOLATED_FAILURE_WINDOW = math.max(
                 50,
                 math.floor(numberSetting(
@@ -1050,11 +1058,17 @@ task.spawn(function()
             -- down from the last protective save. Zone-floor logic
             -- below can still raise it for stricter zones, and
             -- anti-drift demotion covers a server that tightened.
+            -- 2.6: a placeVersion bump says nothing about piñata pacing.
+            -- A profile demoted ONLY by "game build changed" keeps its
+            -- best-qualified warm boot; anti-drift still guards the
+            -- first cycles on the new build.
             local bestQualified = tonumber(calibrationProfile.bestQualifiedInterval)
+            local benignProvisional = calibrationProfile.provisional == true
+                and calibrationProfile.provisionalReason == "game build changed"
 
             if bestQualified
-                and not calibrationProfile.provisional
-                and versionMatches
+                and ((not calibrationProfile.provisional) or benignProvisional)
+                and (versionMatches or benignProvisional)
                 and bestQualified < currentInterval
                 and bestQualified >= SETTINGS.ADAPTIVE_MIN_INTERVAL
             then
@@ -2758,8 +2772,8 @@ task.spawn(function()
             -- calibration segment.
             if calibrationLoadedRemembered
                 and not calibrationProfile.provisional
-                and adaptiveWindowCycles + adaptiveHistoryCount <= 20
-                and adaptiveWindowRejected >= 2
+                and adaptiveWindowCycles + adaptiveHistoryCount <= SETTINGS.EARLY_DEMOTE_WINDOW
+                and adaptiveWindowRejected >= SETTINGS.EARLY_DEMOTE_REJECTS
             then
                 calibrationProfile.provisional = true
                 calibrationProfile.provisionalReason = "early rejections exceed calibration on this server"
@@ -2800,7 +2814,12 @@ task.spawn(function()
             -- a longer clean-evidence window.
             local qualifiedInterval = tonumber(calibrationProfile.recommendedInterval)
 
-            if calibrationProfile.provisional then
+            -- 2.6: benign version-bump profiles keep proven-ground
+            -- treatment (fine probe steps below their best interval);
+            -- real rejection pressure still strips it.
+            if calibrationProfile.provisional
+                and calibrationProfile.provisionalReason ~= "game build changed"
+            then
                 qualifiedInterval = nil
             end
 
